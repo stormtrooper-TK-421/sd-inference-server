@@ -9,6 +9,7 @@ import safetensors.torch
 import shutil
 import tomesd
 import contextlib
+import concurrent.futures
 import numpy as np
 
 DIRECTML_AVAILABLE = False
@@ -43,7 +44,8 @@ DEFAULTS = {
     "strength": 0.75, "sampler": "Euler a", "clip_skip": 1, "eta": 1,
     "hr_upscaler": "Latent (nearest)", "hr_strength": 0.7, "img2img_upscaler": "Lanczos", "mask_blur": 4,
     "attention": "Default", "vram_mode": "Default", "legacy_attention": False,
-    "allow_tf32": "Auto", "autocast_dtype": "Auto"
+    "allow_tf32": "Auto", "autocast_dtype": "Auto",
+    "compile_mode": "Disabled", "compile_vae_decode": False, "compile_timeout": 60
 }
 
 TYPES = {
@@ -51,7 +53,27 @@ TYPES = {
     float: ["scale", "eta", "hr_factor", "hr_eta", "hr_scale"],
 }
 
-STATIC = ["storage", "device", "device_names", "callback", "last_models_modified", "last_models_config", "dataset", "public", "temporary"]
+STATIC = ["storage", "device", "device_names", "callback", "last_models_modified", "last_models_config", "dataset", "public", "temporary", "compiled_modules", "compile_runtime"]
+
+
+class _FallbackCompiledCallable:
+    def __init__(self, eager, compiled, state):
+        self.eager = eager
+        self.compiled = compiled
+        self.state = state
+
+    def __call__(self, *args, **kwargs):
+        if self.state.get("fallback") or not self.compiled:
+            return self.eager(*args, **kwargs)
+
+        try:
+            return self.compiled(*args, **kwargs)
+        except Exception as ex:
+            self.state["fallback"] = True
+            self.state["active"] = False
+            self.state["status"] = "runtime_fallback"
+            self.state["error"] = str(ex)
+            return self.eager(*args, **kwargs)
 
 SAMPLER_CLASSES = {
     "Euler": samplers_k.Euler,
@@ -166,6 +188,12 @@ class GenerationParameters():
         self.callback = None
         self.temporary = {}
         self.selected_attention_backend = attention.get_selected_backend()
+        self.compiled_modules = {}
+        self.compile_runtime = {
+            "enabled": False,
+            "unet": {"requested": False, "active": False, "status": "disabled"},
+            "vae_decode": {"requested": False, "active": False, "status": "disabled"},
+        }
 
     def switch_public(self):
         self.public = True
@@ -404,6 +432,8 @@ class GenerationParameters():
         
         self.storage.clear_file_cache()
 
+        self.prepare_compiled_modules()
+
         if self.cn and all([type(cn) == str for cn in self.cn]):
             self.cn_names = [c for c in self.cn]
         
@@ -470,6 +500,123 @@ class GenerationParameters():
         if self._is_cuda_device(self.device):
             torch.backends.cuda.matmul.allow_tf32 = self.active_tf32
             torch.backends.cudnn.allow_tf32 = self.active_tf32
+
+
+    def _is_compile_enabled(self):
+        value = str(self.compile_mode or "Disabled").strip().lower()
+        return value in {"enabled", "true", "1", "on", "yes", "unet", "all", "unet+vae"}
+
+    def _is_compile_vae_enabled(self):
+        mode = str(self.compile_mode or "Disabled").strip().lower()
+        vae_mode = mode in {"all", "unet+vae", "vae"}
+        return vae_mode or bool(self.compile_vae_decode)
+
+    def _compile_with_timeout(self, fn, timeout):
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _compile_module(self, module, key, timeout):
+        state = {"requested": True, "active": False, "status": "eager"}
+
+        if not self._is_cuda_device(self.device) or not hasattr(torch, "compile"):
+            state["status"] = "unsupported"
+            return state
+
+        eager_forward = getattr(module, "_eager_forward", None)
+        if eager_forward is None:
+            eager_forward = module.forward
+            module._eager_forward = eager_forward
+
+        if key in self.compiled_modules:
+            cached = self.compiled_modules[key]
+            state = cached["state"]
+            state["requested"] = True
+            module.forward = cached["module"]
+            return state
+
+        try:
+            compiled = self._compile_with_timeout(lambda: torch.compile(module), timeout)
+            compiled_forward = compiled.forward if hasattr(compiled, "forward") else compiled
+            state["active"] = True
+            state["status"] = "compiled"
+            wrapped = _FallbackCompiledCallable(eager_forward, compiled_forward, state)
+            self.compiled_modules[key] = {"module": wrapped, "state": state}
+            module.forward = wrapped
+            return state
+        except concurrent.futures.TimeoutError:
+            state["status"] = "timeout"
+            module.forward = eager_forward
+            return state
+        except Exception as ex:
+            state["status"] = "error"
+            state["error"] = str(ex)
+            module.forward = eager_forward
+            return state
+
+    def _compile_vae_decode(self, vae, key, timeout):
+        state = {"requested": True, "active": False, "status": "eager"}
+
+        if not self._is_cuda_device(self.device) or not hasattr(torch, "compile"):
+            state["status"] = "unsupported"
+            return state
+
+        eager_decode = getattr(vae, "_eager_decode", None)
+        if eager_decode is None:
+            eager_decode = vae.decode
+            vae._eager_decode = eager_decode
+
+        if key in self.compiled_modules:
+            cached = self.compiled_modules[key]
+            state = cached["state"]
+            state["requested"] = True
+            vae.decode = cached["module"]
+            return state
+
+        try:
+            compiled = self._compile_with_timeout(lambda: torch.compile(eager_decode), timeout)
+            state["active"] = True
+            state["status"] = "compiled"
+            wrapped = _FallbackCompiledCallable(eager_decode, compiled, state)
+            self.compiled_modules[key] = {"module": wrapped, "state": state}
+            vae.decode = wrapped
+            return state
+        except concurrent.futures.TimeoutError:
+            state["status"] = "timeout"
+            vae.decode = eager_decode
+            return state
+        except Exception as ex:
+            state["status"] = "error"
+            state["error"] = str(ex)
+            vae.decode = eager_decode
+            return state
+
+    def prepare_compiled_modules(self):
+        timeout = max(float(self.compile_timeout or 0), 1.0)
+        compile_unet = self._is_compile_enabled()
+        compile_vae_decode = compile_unet and self._is_compile_vae_enabled()
+
+        self.compile_runtime = {
+            "enabled": bool(compile_unet),
+            "unet": {"requested": bool(compile_unet), "active": False, "status": "disabled"},
+            "vae_decode": {"requested": bool(compile_vae_decode), "active": False, "status": "disabled"},
+        }
+
+        if self.vae and not isinstance(self.vae, str) and hasattr(self.vae, "_eager_decode") and not compile_vae_decode:
+            self.vae.decode = self.vae._eager_decode
+
+        if compile_unet and self.unet and not isinstance(self.unet, str):
+            unet_key = ("unet", id(self.unet), self.unet_name, str(self.device), str(self.storage.dtype), self.selected_attention_backend)
+            state = self._compile_module(self.unet, unet_key, timeout)
+            self.compile_runtime["unet"] = state
+
+        if compile_vae_decode and self.vae and not isinstance(self.vae, str):
+            vae_key = ("vae_decode", id(self.vae), self.vae_name, str(self.device), str(self.storage.vae_dtype), self.selected_attention_backend)
+            state = self._compile_vae_decode(self.vae, vae_key, timeout)
+            self.compile_runtime["vae_decode"] = state
 
     def configure_vae(self):
         if not self.vae:
@@ -545,6 +692,12 @@ class GenerationParameters():
         if self.hr_prediction_type:
             self.hr_prediction_type = self.hr_prediction_type.lower()
 
+        try:
+            self.compile_timeout = float(self.compile_timeout or DEFAULTS["compile_timeout"])
+        except (TypeError, ValueError):
+            self.compile_timeout = DEFAULTS["compile_timeout"]
+        self.compile_vae_decode = str(self.compile_vae_decode).strip().lower() in {"true", "1", "on", "yes", "enabled"} if type(self.compile_vae_decode) != bool else self.compile_vae_decode
+
         if self.hr_factor and self.hr_unet:
             self.storage.set_ram_limit(2)
         else:
@@ -601,6 +754,7 @@ class GenerationParameters():
             "legacy_attention": bool(self.legacy_attention),
             "tf32": bool(self.active_tf32),
             "autocast_dtype": active_autocast_dtype,
+            "compile": self.compile_runtime,
         }
 
     def listify(self, *args):
@@ -1507,6 +1661,7 @@ class GenerationParameters():
 
         data["TI"] = list(self.storage.embeddings_files.keys())
         data["device"] = self.device_names
+        data["compile_mode"] = ["Disabled", "Enabled", "Unet+VAE"]
 
         if self.public:
             data["device"] = ["Default"]
