@@ -1,4 +1,5 @@
 import os
+import inspect
 import torch
 import utils
 
@@ -13,13 +14,27 @@ from diffusers.models.controlnet import ControlNetModel
 
 import accelerate
 import accelerate.utils.modeling
+
+
+def set_module_tensor_to_device(model, key, value):
+    """Compatibility wrapper for accelerate's tensor placement helper."""
+    func = accelerate.utils.modeling.set_module_tensor_to_device
+    signature = inspect.signature(func)
+    kwargs = {"module": model, "tensor_name": key, "device": value.device, "value": value}
+
+    if "dtype" in signature.parameters:
+        kwargs["dtype"] = value.dtype
+
+    func(**kwargs)
+
+
 def load_state_dict_in_place(model, state_dict):
     model_keys = [k for k, _ in model.named_parameters()]
 
     for key in model_keys:
         if not key in state_dict:
             continue
-        accelerate.utils.modeling.set_module_tensor_to_device(model, key, state_dict[key].device, value=state_dict[key])
+        set_module_tensor_to_device(model, key, state_dict[key])
 
     missing_keys = [k for k in model_keys if not k in state_dict]
     unexpected_keys = [k for k in state_dict if not k in model_keys]
