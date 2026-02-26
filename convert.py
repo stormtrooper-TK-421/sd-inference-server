@@ -367,11 +367,25 @@ def convert_checkpoint_save(in_file, out_folder):
     print(f"SAVING {out_file}")
     safetensors.torch.save_file(state_dict, out_file, metadata)
 
+def _read_prediction_type(scheduler_file, unet):
+    import json
+
+    prediction_type = None
+    if os.path.exists(scheduler_file):
+        with open(scheduler_file, "r", encoding='utf-8') as f:
+            scheduler_config = json.load(f)
+        prediction_type = (
+            scheduler_config.get("prediction_type")
+            or scheduler_config.get("config", {}).get("prediction_type")
+        )
+
+    return prediction_type or getattr(unet.config, "prediction_type", "epsilon")
+
+
 def convert_diffusers_folder(in_folder):
     #print(f"CONVERTING {in_folder.rsplit(os.path.sep,1)[-1]}")
     from diffusers import AutoencoderKL, UNet2DConditionModel
     from transformers import CLIPTextModel
-    import json
 
     unet_path = os.path.join(in_folder, "unet")
     vae_path = os.path.join(in_folder, "vae")
@@ -382,6 +396,7 @@ def convert_diffusers_folder(in_folder):
         prediction_type = normalize_prediction_type(json.load(f).get("prediction_type"))
 
     unet = UNet2DConditionModel.from_pretrained(unet_path)
+    prediction_type = _read_prediction_type(scheduler_file, unet)
     model_type = "SDv2" if unet.config.cross_attention_dim == 1024 else "SDv1"
 
     metadata = {
