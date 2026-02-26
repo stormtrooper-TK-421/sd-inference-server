@@ -30,13 +30,29 @@ class UNET(UNet2DConditionModel):
         self.model_type = model_type
         self.model_variant = model_variant
         self.inpainting = model_variant == "Inpainting"
-        self.prediction_type = prediction_type
+        self.prediction_type = self.normalize_prediction_type(prediction_type)
         self.upcast_attention = True if model_variant == "SDv2.1" else False
         self.determined = False
 
         super().__init__(**UNET.get_config(model_type, model_variant))
         self.to(dtype)
         self.additional = None
+
+    @staticmethod
+    def normalize_prediction_type(prediction_type, strict=False):
+        value = (prediction_type or "unknown").strip().lower()
+        aliases = {
+            "epsilon": "epsilon",
+            "eps": "epsilon",
+            "v": "v",
+            "v_prediction": "v",
+        }
+
+        if value in aliases:
+            return aliases[value]
+        if value == "unknown" and not strict:
+            return "unknown"
+        raise ValueError(f"Invalid prediction type: {prediction_type}")
 
     def __call__(self, *args, **kwargs):
         if self.additional:
@@ -120,7 +136,7 @@ class UNET(UNet2DConditionModel):
         return config
     
     def determine_type(self):
-        needs_type = self.prediction_type == "unknown" or self.model_type == "SDv2"
+        needs_type = self.prediction_type == "unknown" or self.model_type in {"SDv2", "SDXL-Base"}
         if self.determined or not needs_type:
             return
         self.determined = True
@@ -137,7 +153,7 @@ class UNET(UNet2DConditionModel):
             test_pred = self(test_latent, test_timestep, encoder_hidden_states=test_cond).sample
 
         is_v = (test_pred - 0.5).mean().item() < -1
-        self.prediction_type = "v" if is_v else "epsilon"
+        self.prediction_type = self.normalize_prediction_type("v" if is_v else "epsilon", strict=True)
         #print("DETECTED", self.prediction_type, "PREDICTION")
 
 class VAE(AutoencoderKL):

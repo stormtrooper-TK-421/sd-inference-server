@@ -33,11 +33,13 @@ class GuidedDenoiser():
         if self.override_prediction_type:
             prediction_type = self.override_prediction_type
 
+        prediction_type = self.unet.normalize_prediction_type(prediction_type)
+
         if prediction_type == "unknown":
             self.unet.determine_type()
             prediction_type = self.unet.prediction_type
-        
-        return prediction_type
+
+        return self.unet.normalize_prediction_type(prediction_type, strict=True)
 
     def get_conditioning(self):
         self.compositions = self.conditioning_schedule.get_compositions(self.dtype, self.device)
@@ -148,6 +150,8 @@ class GuidedDenoiser():
             noise_pred = self.predict_noise_epsilon(model_input, timestep, conditioning, alpha)
         elif prediction_type == "v":
             noise_pred = self.predict_noise_v(model_input, timestep, conditioning, alpha)
+        else:
+            raise RuntimeError(f"Unknown prediction type: {prediction_type}")
 
         composed_pred = self.compose_predictions(noise_pred)
         return composed_pred

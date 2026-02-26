@@ -316,10 +316,6 @@ def convert_checkpoint(in_file):
             import yaml
             with open(yaml_file, "r", encoding='utf-8') as f:
                 metadata["prediction_type"] = yaml.safe_load(f)["model"]["params"].get("parameterization", "epsilon")
-        else:
-            if metadata["model_type"] in {"SDXL-Base"} :
-                metadata["prediction_type"] = "epsilon"
-                #print("USING", metadata["prediction_type"], "PREDICTION")
 
     if metadata["model_type"] == "SDv1":
         #print("CONVERTING FROM SDv1")
