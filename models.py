@@ -232,13 +232,17 @@ class VAE(AutoencoderKL):
         return config
 
 class CLIP(torch.nn.Module):
-    def __init__(self, model_type, dtype):
+    def __init__(self, model_type, dtype, model_variant=""):
         super().__init__()
         self.model_type = model_type
+        self.model_variant = model_variant
         if model_type in {"SDv1", "SDv2"}:
             self.model = CustomCLIP(CLIP.get_config(model_type))
         elif model_type == "SDXL-Base":
-            self.model = CustomSDXLCLIP(CLIP.get_config(model_type, "OpenCLIP"), CLIP.get_config(model_type, "LDM"))
+            if model_variant == "Refiner":
+                self.model = CustomCLIP(CLIP.get_config(model_type, "OpenCLIP"), text_projection=True)
+            else:
+                self.model = CustomSDXLCLIP(CLIP.get_config(model_type, "OpenCLIP"), CLIP.get_config(model_type, "LDM"))
         self.to(dtype)
         self.tokenizer = Tokenizer(model_type)
         self.additional = None
@@ -251,7 +255,7 @@ class CLIP(torch.nn.Module):
         return self.model.state_dict()
 
     def get_lora_model(self):
-        if self.model_type == "SDXL-Base":
+        if self.model_type == "SDXL-Base" and self.model_variant != "Refiner":
             return [self.model.ldm_clip, self.model.open_clip]
         else:
             return self.model
@@ -266,12 +270,13 @@ class CLIP(torch.nn.Module):
         if not dtype:
             dtype = state_dict['metadata']['dtype']
         model_type = state_dict['metadata']['model_type']
+        model_variant = state_dict['metadata'].get('model_variant', "")
         del state_dict["metadata"]
 
         utils.cast_state_dict(state_dict, dtype, device)
 
         with accelerate.init_empty_weights():
-            clip = CLIP(model_type, dtype)
+            clip = CLIP(model_type, dtype, model_variant)
 
         missing, _ = load_state_dict_in_place(clip.model, state_dict)
         if missing:
@@ -316,6 +321,8 @@ class CLIP(torch.nn.Module):
     def set_textual_inversions(self, embeddings):
         tokenized = []
         for name, vec in embeddings.items():
+            if self.model_type == "SDXL-Base" and self.model_variant == "Refiner" and vec.ndim >= 2 and vec.shape[1] == 2048:
+                vec = vec[:, :1280]
             name = tuple(self.tokenizer(name)["input_ids"][1:-1])
             tokenized += [(name, vec)]
         self.textual_inversions = tokenized
