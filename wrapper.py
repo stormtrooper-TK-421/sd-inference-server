@@ -42,7 +42,8 @@ import models
 DEFAULTS = {
     "strength": 0.75, "sampler": "Euler a", "clip_skip": 1, "eta": 1,
     "hr_upscaler": "Latent (nearest)", "hr_strength": 0.7, "img2img_upscaler": "Lanczos", "mask_blur": 4,
-    "attention": "Default", "vram_mode": "Default", "legacy_attention": False
+    "attention": "Default", "vram_mode": "Default", "legacy_attention": False,
+    "allow_tf32": "Auto", "autocast_dtype": "Auto"
 }
 
 TYPES = {
@@ -121,6 +122,13 @@ CROSS_ATTENTION = {
 }
 
 FP32_DEVICES = ["1660", "1650", "1630", "T500", "T550", "T600", "MX550", "MX450", "CMP 30HX"]
+AUTOCAST_DTYPE_MAP = {
+    "fp16": torch.float16,
+    "float16": torch.float16,
+    "half": torch.float16,
+    "bf16": torch.bfloat16,
+    "bfloat16": torch.bfloat16,
+}
 
 def format_float(x):
     return f"{x:.4f}".rstrip('0').rstrip('.')
@@ -425,6 +433,44 @@ class GenerationParameters():
         else:
             self.storage.vae_dtype = torch.float16
 
+    def _is_cuda_device(self, device):
+        return isinstance(device, torch.device) and device.type == "cuda"
+
+    def _resolve_tf32_policy(self, allow_tf32, device):
+        if not self._is_cuda_device(device):
+            return False
+
+        value = str(allow_tf32 or "Auto").strip().lower()
+        if value in {"enabled", "true", "1", "on", "yes"}:
+            return True
+        if value in {"disabled", "false", "0", "off", "no"}:
+            return False
+        return torch.cuda.get_device_capability(device)[0] >= 8
+
+    def _resolve_autocast_dtype(self, dtype, device):
+        if not self._is_cuda_device(device):
+            return None
+
+        value = str(dtype or "Auto").strip().lower()
+        requested = AUTOCAST_DTYPE_MAP.get(value)
+        if requested is None and value not in {"auto", ""}:
+            requested = torch.float16
+
+        supports_bf16 = torch.cuda.is_bf16_supported(device)
+        if requested == torch.bfloat16:
+            return torch.bfloat16 if supports_bf16 else torch.float16
+        if requested == torch.float16:
+            return torch.float16
+        return torch.bfloat16 if supports_bf16 else torch.float16
+
+    def configure_performance_policy(self):
+        self.active_tf32 = self._resolve_tf32_policy(self.allow_tf32, self.device)
+        self.active_autocast_dtype = self._resolve_autocast_dtype(self.autocast_dtype, self.device)
+
+        if self._is_cuda_device(self.device):
+            torch.backends.cuda.matmul.allow_tf32 = self.active_tf32
+            torch.backends.cudnn.allow_tf32 = self.active_tf32
+
     def configure_vae(self):
         if not self.vae:
             return
@@ -542,10 +588,19 @@ class GenerationParameters():
         )
 
     def get_info(self):
+        if self.active_autocast_dtype == torch.bfloat16:
+            active_autocast_dtype = "bfloat16"
+        elif self.active_autocast_dtype == torch.float16:
+            active_autocast_dtype = "float16"
+        else:
+            active_autocast_dtype = None
+
         return {
             "attention_mode": self.attention,
             "attention_backend": self.selected_attention_backend or attention.get_selected_backend(),
             "legacy_attention": bool(self.legacy_attention),
+            "tf32": bool(self.active_tf32),
+            "autocast_dtype": active_autocast_dtype,
         }
 
     def listify(self, *args):
@@ -801,8 +856,10 @@ class GenerationParameters():
             tomesd.remove_patch(unet)
 
     def get_autocast_context(self, autocast, device):
-        if autocast:
-            return torch.autocast('cpu' if device == torch.device('cpu') else 'cuda')
+        if autocast and self._is_cuda_device(device):
+            if self.active_autocast_dtype:
+                return torch.autocast("cuda", dtype=self.active_autocast_dtype)
+            return torch.autocast("cuda")
         return contextlib.nullcontext()
 
     def prepare_images(self, inputs, extents, width, height):
@@ -825,6 +882,7 @@ class GenerationParameters():
 
         self.set_status("Loading")
         self.set_device()
+        self.configure_performance_policy()
         self.set_precision()
         self.set_attention()
         self.load_models(*initial_networks)
@@ -1117,6 +1175,7 @@ class GenerationParameters():
 
         self.set_status("Loading")
         self.set_device()
+        self.configure_performance_policy()
         self.set_precision()
         self.set_attention()
         self.load_models(*initial_networks)
@@ -1265,6 +1324,7 @@ class GenerationParameters():
 
         self.set_status("Loading")
         self.set_device()
+        self.configure_performance_policy()
         self.set_precision()
         self.set_attention()
 
@@ -1352,6 +1412,7 @@ class GenerationParameters():
     def upscale(self):
         self.set_status("Loading")
         self.set_device()
+        self.configure_performance_policy()
         self.set_precision()
         self.storage.clear_file_cache()
         self.clear_annotators()
