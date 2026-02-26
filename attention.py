@@ -2,6 +2,7 @@ import torch
 import einops
 import math
 import diffusers
+from packaging import version
 
 HAVE_XFORMERS = False
 try:
@@ -17,6 +18,44 @@ try:
 except:   
     raise Exception("Incompatible Diffusers version: " + diffusers.__file__)
 CURRENT_FORWARD = ORIGINAL_FORWARD
+SELECTED_BACKEND = "diffusers"
+
+MIN_TORCH_SDPA = version.parse("2.0.0")
+
+
+def _parse_torch_version():
+    raw = torch.__version__.split("+", 1)[0]
+    return version.parse(raw)
+
+
+def _device_is_cuda(device):
+    return "cuda" in str(device)
+
+
+def can_use_sdpa(device):
+    if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        return False
+    if _parse_torch_version() < MIN_TORCH_SDPA:
+        return False
+    if _device_is_cuda(device) and not torch.cuda.is_available():
+        return False
+    return True
+
+
+def can_use_xformers(device):
+    return HAVE_XFORMERS and _device_is_cuda(device) and torch.cuda.is_available()
+
+
+def supports_diffusers_processors(components=None):
+    if not hasattr(diffusers.models.attention_processor, "AttnProcessor"):
+        return False
+    if not components:
+        return True
+    return all(hasattr(component, "set_attn_processor") for component in components if component is not None)
+
+
+def get_selected_backend():
+    return SELECTED_BACKEND
 
 def do_attention(self, hidden_states, encoder_hidden_states=None, attention_mask=None, temb=None, **cross_attention_kwargs):
     if CURRENT_FORWARD == ORIGINAL_FORWARD:
@@ -48,8 +87,10 @@ def do_attention(self, hidden_states, encoder_hidden_states=None, attention_mask
     return hidden_states
 
 def set_attention(forward):
-    global CURRENT_FORWARD
+    global CURRENT_FORWARD, SELECTED_BACKEND
     CURRENT_FORWARD = forward
+    if forward == ORIGINAL_FORWARD:
+        SELECTED_BACKEND = "diffusers"
     try:
         diffusers.models.attention_processor.Attention.forward = do_attention
         return
@@ -57,30 +98,68 @@ def set_attention(forward):
         pass
     raise ValueError("failed to find attention forward")
 
-def get_available():
-    available = [
-        use_optimized_attention,
-        use_split_attention,
-        use_doggettx_attention,
-        use_flash_attention,
-        use_diffusers_attention,
-        use_sdp_attention
-    ]
-    if HAVE_XFORMERS:
-        available += [use_xformers_attention]
+def get_available(device=None, legacy_attention=False):
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    available = ["Default", "Original"]
+
+    if can_use_sdpa(device):
+        available += ["SDP", "Flash"]
+
+    if can_use_xformers(device):
+        available += ["XFormers"]
+
+    if legacy_attention:
+        available += ["Split"]
+        if _device_is_cuda(device):
+            available += ["Doggettx"]
+
     return available
 
-def use_optimized_attention(device):
-    if "cuda" in str(device):
-        if "rocm" in torch.__version__:
+def apply_attention(mode, device, components=None, legacy_attention=False):
+    """
+    Backend selection priority:
+    1) Native diffusers processors / forward
+    2) Torch SDPA/flash
+    3) xFormers
+    4) Legacy split/doggettx (only if explicitly enabled)
+    """
+    global SELECTED_BACKEND
+
+    mode = mode or "Default"
+
+    if mode in {"Original", "Default"} and supports_diffusers_processors(components):
+        use_diffusers_attention(device)
+        SELECTED_BACKEND = "diffusers"
+        return "diffusers"
+
+    if mode in {"Default", "SDP", "Flash"} and can_use_sdpa(device):
+        use_sdp_attention(device)
+        SELECTED_BACKEND = "sdpa"
+        return "sdpa"
+
+    if mode in {"Default", "XFormers"} and can_use_xformers(device):
+        use_xformers_attention(device)
+        SELECTED_BACKEND = "xformers"
+        return "xformers"
+
+    if legacy_attention:
+        if mode in {"Default", "Doggettx"} and _device_is_cuda(device):
             use_doggettx_attention(device)
-        else:
-            if HAVE_XFORMERS:
-                use_xformers_attention(device)
-            else:
-                use_sdp_attention(device)
-    else:
-       use_split_attention(device)
+            SELECTED_BACKEND = "doggettx"
+            return "doggettx"
+        if mode in {"Default", "Split"}:
+            use_split_attention(device)
+            SELECTED_BACKEND = "split"
+            return "split"
+
+    use_diffusers_attention(device)
+    SELECTED_BACKEND = "diffusers"
+    return "diffusers"
+
+
+def use_optimized_attention(device):
+    apply_attention("Default", device, legacy_attention=True)
 
 def use_diffusers_attention(device):
     set_attention(ORIGINAL_FORWARD)

@@ -42,7 +42,7 @@ import models
 DEFAULTS = {
     "strength": 0.75, "sampler": "Euler a", "clip_skip": 1, "eta": 1,
     "hr_upscaler": "Latent (nearest)", "hr_strength": 0.7, "img2img_upscaler": "Lanczos", "mask_blur": 4,
-    "attention": "Default", "vram_mode": "Default"
+    "attention": "Default", "vram_mode": "Default", "legacy_attention": False
 }
 
 TYPES = {
@@ -111,13 +111,13 @@ UPSCALERS_PIXEL = {
 }
 
 CROSS_ATTENTION = {
-    "Default": attention.use_optimized_attention,
-    "Split": attention.use_split_attention,
-    "Doggettx": attention.use_doggettx_attention,
-    "Flash": attention.use_flash_attention,
-    "Original": attention.use_diffusers_attention,
-    "SDP": attention.use_sdp_attention,
-    "XFormers": attention.use_xformers_attention
+    "Default": "Default",
+    "Split": "Split",
+    "Doggettx": "Doggettx",
+    "Flash": "Flash",
+    "Original": "Original",
+    "SDP": "SDP",
+    "XFormers": "XFormers",
 }
 
 FP32_DEVICES = ["1660", "1650", "1630", "T500", "T550", "T600", "MX550", "MX450", "CMP 30HX"]
@@ -157,6 +157,7 @@ class GenerationParameters():
 
         self.callback = None
         self.temporary = {}
+        self.selected_attention_backend = attention.get_selected_backend()
 
     def switch_public(self):
         self.public = True
@@ -530,9 +531,22 @@ class GenerationParameters():
 
         self.device = device
     
-    def set_attention(self):       
-        if self.attention and self.attention in CROSS_ATTENTION:
-            CROSS_ATTENTION[self.attention](self.device)
+    def set_attention(self):
+        mode = CROSS_ATTENTION.get(self.attention, "Default")
+        components = [self.unet, self.clip, self.vae]
+        self.selected_attention_backend = attention.apply_attention(
+            mode,
+            self.device,
+            components=components,
+            legacy_attention=bool(self.legacy_attention),
+        )
+
+    def get_info(self):
+        return {
+            "attention_mode": self.attention,
+            "attention_backend": self.selected_attention_backend or attention.get_selected_backend(),
+            "legacy_attention": bool(self.legacy_attention),
+        }
 
     def listify(self, *args):
         if args == None:
@@ -688,6 +702,8 @@ class GenerationParameters():
                     m["padding"] = self.padding
                 m["mask_blur"] = self.mask_blur
 
+            m.update(self.get_info())
+
             if self.merge_lora_recipe:
                 m["merge_lora_recipe"] = self.merge_lora_recipe
                 m["merge_lora_strength"] = self.merge_lora_strength
@@ -812,6 +828,7 @@ class GenerationParameters():
         self.set_precision()
         self.set_attention()
         self.load_models(*initial_networks)
+        self.set_attention()
 
         self.attach_tome()
 
@@ -1103,6 +1120,7 @@ class GenerationParameters():
         self.set_precision()
         self.set_attention()
         self.load_models(*initial_networks)
+        self.set_attention()
 
         self.attach_tome()
 
@@ -1256,6 +1274,7 @@ class GenerationParameters():
             self.cn = None
         
         self.load_models(*initial_networks)
+        self.set_attention()
 
         self.attach_tome()
 
@@ -1422,8 +1441,8 @@ class GenerationParameters():
         data["hr_upscaler"] = list(UPSCALERS_LATENT.keys()) + list(UPSCALERS_PIXEL.keys()) + data["SR"]
         data["img2img_upscaler"] = list(UPSCALERS_PIXEL.keys()) + data["SR"]
 
-        available = attention.get_available() 
-        data["attention"] = [k for k,v in CROSS_ATTENTION.items() if v in available]
+        available = attention.get_available(self.device, legacy_attention=bool(self.legacy_attention))
+        data["attention"] = [k for k in CROSS_ATTENTION if k in available]
 
         data["TI"] = list(self.storage.embeddings_files.keys())
         data["device"] = self.device_names
@@ -1596,6 +1615,7 @@ class GenerationParameters():
         self.set_attention()
         
         self.load_models(*initial_networks)
+        self.set_attention()
 
         device = self.unet.device
 
