@@ -9,6 +9,32 @@ import safetensors.torch
 
 import utils
 
+
+def normalize_prediction_type(prediction_type, allow_unknown=False):
+    value = (prediction_type or "").strip().lower()
+    aliases = {
+        "epsilon": "epsilon",
+        "eps": "epsilon",
+        "v_prediction": "v",
+        "v": "v",
+    }
+
+    if value in aliases:
+        return aliases[value]
+
+    if value in {"", "unknown"} and allow_unknown:
+        return "unknown"
+
+    if value == "sample":
+        raise ValueError(
+            "Unsupported prediction type 'sample'. Only 'epsilon' and 'v_prediction' are supported."
+        )
+
+    raise ValueError(
+        f"Unsupported prediction type: {prediction_type!r}. "
+        "Expected one of: epsilon, v_prediction."
+    )
+
 def SDv1_convert(state_dict):
     mapping = {}
     with open(utils.relative_file(os.path.join("mappings", "SDv1_mapping.txt"))) as file:
@@ -317,6 +343,8 @@ def convert_checkpoint(in_file):
             with open(yaml_file, "r", encoding='utf-8') as f:
                 metadata["prediction_type"] = yaml.safe_load(f)["model"]["params"].get("parameterization", "epsilon")
 
+    metadata["prediction_type"] = normalize_prediction_type(metadata["prediction_type"], allow_unknown=True)
+
     if metadata["model_type"] == "SDv1":
         #print("CONVERTING FROM SDv1")
         SDv1_convert(state_dict)
@@ -363,6 +391,9 @@ def convert_diffusers_folder(in_folder):
     vae_path = os.path.join(in_folder, "vae")
     clip_path = os.path.join(in_folder, "text_encoder")
     scheduler_file = os.path.join(in_folder, "scheduler", "scheduler_config.json")
+
+    with open(scheduler_file, "r", encoding='utf-8') as f:
+        prediction_type = normalize_prediction_type(json.load(f).get("prediction_type"))
 
     unet = UNet2DConditionModel.from_pretrained(unet_path)
     prediction_type = _read_prediction_type(scheduler_file, unet)
