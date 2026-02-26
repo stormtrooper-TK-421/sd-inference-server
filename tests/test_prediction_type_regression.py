@@ -133,6 +133,71 @@ def test_detect_diffusers_architecture_guardrail_for_missing_unet_config(tmp_pat
         _detect_diffusers_architecture(str(tmp_path))
 
 
+def test_unet_determine_type_sdxl_does_not_crash_without_metadata(monkeypatch):
+    """SDXL UNets with unknown prediction_type must survive determine_type().
+
+    diffusers >=0.35 requires non-empty added_cond_kwargs (text_embeds + time_ids)
+    for any UNet with addition_embed_type='text_time'.  A bare {} dict raises
+    ValueError, so determine_type() must supply minimal dummy tensors for SDXL.
+    """
+    import types
+    import torch
+
+    # Build a minimal fake UNET that records the added_cond_kwargs it receives
+    # and returns a constant prediction tensor (below the v-detection threshold).
+    received_kwargs = {}
+
+    class _FakeSample:
+        def __init__(self, val):
+            self._t = torch.full((1, 4, 8, 8), val)
+
+        def any(self):
+            return False  # no NaNs
+
+    class _FakeOutput:
+        def __init__(self, val):
+            self.sample = torch.full((1, 4, 8, 8), val)
+
+    class _FakeUNET:
+        model_type = "SDXL-Base"
+        prediction_type = "unknown"
+        determined = False
+        upcast_attention = False
+        model_variant = ""
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        class config:
+            cross_attention_dim = 2048
+            in_channels = 4
+
+        def __call__(self, latent, timestep, encoder_hidden_states=None, **kwargs):
+            received_kwargs.update(kwargs)
+            # epsilon-like output (mean close to 0, well above -1 threshold)
+            return _FakeOutput(0.0)
+
+        # bind the real determine_type implementation onto our fake class
+        from models import UNET as _UNET
+        determine_type = _UNET.determine_type
+        normalize_prediction_type = staticmethod(_UNET.normalize_prediction_type)
+
+    fake = _FakeUNET()
+    fake.determine_type(fake)  # must not raise
+
+    assert fake.prediction_type in {"epsilon", "v"}, (
+        f"prediction_type should be resolved, got {fake.prediction_type!r}"
+    )
+    assert "added_cond_kwargs" in received_kwargs, (
+        "determine_type() must pass added_cond_kwargs for SDXL"
+    )
+    ack = received_kwargs["added_cond_kwargs"]
+    assert "text_embeds" in ack and "time_ids" in ack, (
+        "added_cond_kwargs must contain text_embeds and time_ids"
+    )
+    assert ack["text_embeds"].shape == (1, 1280)
+    assert ack["time_ids"].shape == (1, 6)
+
+
 @pytest.mark.parametrize(
     "fixture_name,expected_model_type,expected_model_variant",
     [

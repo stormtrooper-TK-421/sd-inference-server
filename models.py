@@ -151,8 +151,7 @@ class UNET(UNet2DConditionModel):
         return config
     
     def determine_type(self):
-        needs_type = self.prediction_type == "unknown" or self.model_type in {"SDv2", "SDXL-Base"}
-        if self.determined or not needs_type:
+        if self.determined or self.prediction_type != "unknown":
             return
         self.determined = True
 
@@ -160,12 +159,21 @@ class UNET(UNet2DConditionModel):
         test_latent = torch.ones((1, self.config.in_channels, 8, 8), device=self.device, dtype=self.dtype) * 0.5
         test_timestep = torch.asarray([999], device=self.device, dtype=self.dtype)
 
-        test_pred = self(test_latent, test_timestep, encoder_hidden_states=test_cond).sample
+        extra_kwargs = {}
+        if self.model_type == "SDXL-Base":
+            # diffusers >=0.35 requires text_embeds (pooled OpenCLIP, dim=1280)
+            # and time_ids (6 scalars: orig_h, orig_w, crop_top, crop_left, tgt_h, tgt_w)
+            extra_kwargs["added_cond_kwargs"] = {
+                "text_embeds": torch.zeros((1, 1280), device=self.device, dtype=self.dtype),
+                "time_ids": torch.zeros((1, 6), device=self.device, dtype=self.dtype),
+            }
+
+        test_pred = self(test_latent, test_timestep, encoder_hidden_states=test_cond, **extra_kwargs).sample
         if torch.isnan(test_pred).any():
             #print('UPCASTING ATTENTION')
             self.upcast_attention = True
             self.model_variant = "SDv2.1"
-            test_pred = self(test_latent, test_timestep, encoder_hidden_states=test_cond).sample
+            test_pred = self(test_latent, test_timestep, encoder_hidden_states=test_cond, **extra_kwargs).sample
 
         is_v = (test_pred - 0.5).mean().item() < -1
         self.prediction_type = self.normalize_prediction_type("v" if is_v else "epsilon", strict=True)
