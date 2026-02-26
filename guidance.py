@@ -151,7 +151,10 @@ class GuidedDenoiser():
         elif prediction_type == "v":
             noise_pred = self.predict_noise_v(model_input, timestep, conditioning, alpha)
         else:
-            raise RuntimeError(f"Unknown prediction type: {prediction_type}")
+            raise ValueError(
+                f"Unknown prediction type in predict_noise: {prediction_type}. "
+                "Expected 'epsilon' or 'v'."
+            )
 
         composed_pred = self.compose_predictions(noise_pred)
         return composed_pred
