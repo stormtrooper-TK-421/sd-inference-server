@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import types
 
@@ -6,7 +7,12 @@ import pytest
 import torch
 import safetensors.torch
 
-from convert import convert_checkpoint, convert_diffusers_folder, normalize_prediction_type
+from convert import (
+    _detect_diffusers_architecture,
+    convert_checkpoint,
+    convert_diffusers_folder,
+    normalize_prediction_type,
+)
 
 
 def test_convert_checkpoint_sdxl_without_metadata_keeps_unknown_prediction_type(tmp_path):
@@ -35,13 +41,27 @@ def test_convert_prediction_type_normalization_rejects_sample():
         normalize_prediction_type("sample")
 
 
-def _install_fake_diffusers_and_transformers(monkeypatch, cross_attention_dim=1024):
-    class _FakeModel:
-        def __init__(self, config=None):
-            self.config = config or types.SimpleNamespace(cross_attention_dim=cross_attention_dim)
+def _install_fake_diffusers_and_transformers(monkeypatch):
+    class _FakeUNetModel:
+        def __init__(self, config):
+            self.config = config
 
         @classmethod
         def from_pretrained(cls, path):
+            config_path = os.path.join(path, "config.json")
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = types.SimpleNamespace(**json.load(f))
+            return cls(config=config)
+
+        def to(self, _dtype):
+            return self
+
+        def state_dict(self):
+            return {"weight": torch.zeros((1,), dtype=torch.float16)}
+
+    class _FakeComponent:
+        @classmethod
+        def from_pretrained(cls, _path):
             return cls()
 
         def to(self, _dtype):
@@ -51,11 +71,11 @@ def _install_fake_diffusers_and_transformers(monkeypatch, cross_attention_dim=10
             return {"weight": torch.zeros((1,), dtype=torch.float16)}
 
     fake_diffusers = types.ModuleType("diffusers")
-    fake_diffusers.AutoencoderKL = _FakeModel
-    fake_diffusers.UNet2DConditionModel = _FakeModel
+    fake_diffusers.AutoencoderKL = _FakeComponent
+    fake_diffusers.UNet2DConditionModel = _FakeUNetModel
 
     fake_transformers = types.ModuleType("transformers")
-    fake_transformers.CLIPTextModel = _FakeModel
+    fake_transformers.CLIPTextModel = _FakeComponent
 
     monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
@@ -65,6 +85,8 @@ def _make_min_diffusers_folder(tmp_path, prediction_type):
     model_dir = tmp_path / f"model_{prediction_type}"
     for sub in ["unet", "vae", "text_encoder", "scheduler"]:
         (model_dir / sub).mkdir(parents=True, exist_ok=True)
+    with open(model_dir / "unet" / "config.json", "w", encoding="utf-8") as f:
+        json.dump({"cross_attention_dim": 1024}, f)
     with open(model_dir / "scheduler" / "scheduler_config.json", "w", encoding="utf-8") as f:
         json.dump({"prediction_type": prediction_type}, f)
     return model_dir
@@ -85,4 +107,49 @@ def test_convert_diffusers_folder_keeps_epsilon_metadata(tmp_path, monkeypatch):
 
     _, metadata = convert_diffusers_folder(str(model_dir))
 
+    assert metadata["prediction_type"] == "epsilon"
+
+
+@pytest.mark.parametrize(
+    "fixture_name,expected_model_type,expected_model_variant",
+    [
+        ("sd1", "SDv1", ""),
+        ("sd2", "SDv2", ""),
+        ("sdxl_base", "SDXL-Base", ""),
+        ("sdxl_refiner", "SDXL-Base", "Refiner"),
+    ],
+)
+def test_detect_diffusers_architecture_fixtures(fixture_name, expected_model_type, expected_model_variant):
+    model_dir = os.path.join("tests", "fixtures", "diffusers_arch", fixture_name)
+
+    architecture = _detect_diffusers_architecture(model_dir)
+
+    assert architecture["model_type"] == expected_model_type
+    assert architecture["model_variant"] == expected_model_variant
+
+
+def test_detect_diffusers_architecture_guardrail_for_missing_unet_config(tmp_path):
+    with pytest.raises(ValueError, match="missing 'unet/config.json'"):
+        _detect_diffusers_architecture(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "fixture_name,expected_model_type,expected_model_variant",
+    [
+        ("sd1", "SDv1", ""),
+        ("sd2", "SDv2", ""),
+        ("sdxl_base", "SDXL-Base", ""),
+        ("sdxl_refiner", "SDXL-Base", "Refiner"),
+    ],
+)
+def test_convert_diffusers_folder_uses_detected_metadata(
+    fixture_name, expected_model_type, expected_model_variant, monkeypatch
+):
+    _install_fake_diffusers_and_transformers(monkeypatch)
+    model_dir = os.path.join("tests", "fixtures", "diffusers_arch", fixture_name)
+
+    _, metadata = convert_diffusers_folder(model_dir)
+
+    assert metadata["model_type"] == expected_model_type
+    assert metadata["model_variant"] == expected_model_variant
     assert metadata["prediction_type"] == "epsilon"

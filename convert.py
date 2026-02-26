@@ -2,6 +2,7 @@ import os
 import sys
 import glob
 import shutil
+import json
 
 import torch
 import safetensors
@@ -368,8 +369,6 @@ def convert_checkpoint_save(in_file, out_folder):
     safetensors.torch.save_file(state_dict, out_file, metadata)
 
 def _read_prediction_type(scheduler_file, unet):
-    import json
-
     prediction_type = None
     if os.path.exists(scheduler_file):
         with open(scheduler_file, "r", encoding='utf-8') as f:
@@ -382,6 +381,75 @@ def _read_prediction_type(scheduler_file, unet):
     return prediction_type or getattr(unet.config, "prediction_type", "epsilon")
 
 
+def _detect_diffusers_architecture(in_folder):
+    unet_config_path = os.path.join(in_folder, "unet", "config.json")
+    if not os.path.exists(unet_config_path):
+        raise ValueError(
+            "Unsupported diffusers layout: missing 'unet/config.json'. "
+            "Expected architecture keys: unet.config.cross_attention_dim, "
+            "unet.config.addition_embed_type (for SDXL)."
+        )
+
+    with open(unet_config_path, "r", encoding="utf-8") as f:
+        unet_config = json.load(f)
+
+    cross_attention_dim = unet_config.get("cross_attention_dim")
+    addition_embed_type = unet_config.get("addition_embed_type")
+
+    has_text_encoder = os.path.isdir(os.path.join(in_folder, "text_encoder"))
+    has_text_encoder_2 = os.path.isdir(os.path.join(in_folder, "text_encoder_2"))
+
+    if addition_embed_type == "text_time":
+        if has_text_encoder and has_text_encoder_2:
+            return {
+                "architecture": "SDXL-Base",
+                "model_type": "SDXL-Base",
+                "model_variant": "",
+                "namespace": "SDXL-Base",
+                "text_encoder_paths": ["text_encoder", "text_encoder_2"],
+            }
+        if has_text_encoder_2 and not has_text_encoder:
+            return {
+                "architecture": "SDXL-Refiner",
+                "model_type": "SDXL-Base",
+                "model_variant": "Refiner",
+                "namespace": "SDXL-Base",
+                "text_encoder_paths": ["text_encoder_2"],
+            }
+        raise ValueError(
+            "Unsupported SDXL layout: expected 'text_encoder_2' and optionally 'text_encoder'. "
+            "Expected config keys: unet.config.addition_embed_type='text_time', "
+            "unet.config.cross_attention_dim."
+        )
+
+    if cross_attention_dim == 1024:
+        return {
+            "architecture": "SD2.x",
+            "model_type": "SDv2",
+            "model_variant": "",
+            "namespace": "SDv2",
+            "text_encoder_paths": ["text_encoder"],
+        }
+
+    if cross_attention_dim == 768:
+        return {
+            "architecture": "SD1.x",
+            "model_type": "SDv1",
+            "model_variant": "",
+            "namespace": "SDv1",
+            "text_encoder_paths": ["text_encoder"],
+        }
+
+    raise ValueError(
+        "Unsupported diffusers UNet architecture. "
+        f"Found cross_attention_dim={cross_attention_dim!r}, addition_embed_type={addition_embed_type!r}. "
+        "Expected one of: "
+        "SD1.x (cross_attention_dim=768), "
+        "SD2.x (cross_attention_dim=1024), "
+        "SDXL (addition_embed_type='text_time')."
+    )
+
+
 def convert_diffusers_folder(in_folder):
     #print(f"CONVERTING {in_folder.rsplit(os.path.sep,1)[-1]}")
     from diffusers import AutoencoderKL, UNet2DConditionModel
@@ -389,20 +457,20 @@ def convert_diffusers_folder(in_folder):
 
     unet_path = os.path.join(in_folder, "unet")
     vae_path = os.path.join(in_folder, "vae")
-    clip_path = os.path.join(in_folder, "text_encoder")
     scheduler_file = os.path.join(in_folder, "scheduler", "scheduler_config.json")
 
-    with open(scheduler_file, "r", encoding='utf-8') as f:
-        prediction_type = normalize_prediction_type(json.load(f).get("prediction_type"))
+    architecture = _detect_diffusers_architecture(in_folder)
 
     unet = UNet2DConditionModel.from_pretrained(unet_path)
-    prediction_type = _read_prediction_type(scheduler_file, unet)
-    model_type = "SDv2" if unet.config.cross_attention_dim == 1024 else "SDv1"
+    prediction_type = normalize_prediction_type(_read_prediction_type(scheduler_file, unet), allow_unknown=True)
+    model_type = architecture["model_type"]
+    model_variant = architecture["model_variant"]
+    namespace = architecture["namespace"]
 
     metadata = {
         "model_type": model_type,
         "prediction_type": prediction_type,
-        "model_variant": ""
+        "model_variant": model_variant,
     }
 
     #print("CONVERTING FROM", model_type)
@@ -410,18 +478,25 @@ def convert_diffusers_folder(in_folder):
     state_dict = {}
     unet = unet.to(torch.float16).state_dict()
     for k in list(unet.keys()):
-        state_dict[f"{model_type}.UNET.{k}"] = unet[k]
+        state_dict[f"{namespace}.UNET.{k}"] = unet[k]
         del unet[k]
 
     vae = AutoencoderKL.from_pretrained(vae_path).to(torch.float16).state_dict()
     for k in list(vae.keys()):
-        state_dict[f"{model_type}.VAE.{k}"] = vae[k]
+        state_dict[f"{namespace}.VAE.{k}"] = vae[k]
         del vae[k]
 
-    clip = CLIPTextModel.from_pretrained(clip_path).to(torch.float16).state_dict()
-    for k in list(clip.keys()):
-        state_dict[f"{model_type}.CLIP.{k}"] = clip[k]
-        del clip[k]
+    clip_key_prefixes = {
+        "text_encoder": "CLIP.ldm_clip" if model_type == "SDXL-Base" else "CLIP",
+        "text_encoder_2": "CLIP.open_clip",
+    }
+    for clip_subdir in architecture["text_encoder_paths"]:
+        clip_path = os.path.join(in_folder, clip_subdir)
+        clip = CLIPTextModel.from_pretrained(clip_path).to(torch.float16).state_dict()
+        clip_prefix = clip_key_prefixes.get(clip_subdir, "CLIP")
+        for k in list(clip.keys()):
+            state_dict[f"{namespace}.{clip_prefix}.{k}"] = clip[k]
+            del clip[k]
 
     #print("DONE")
 
