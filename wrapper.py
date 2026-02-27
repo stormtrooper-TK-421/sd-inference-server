@@ -617,12 +617,6 @@ class GenerationParameters():
             "vae_decode": {"requested": bool(compile_vae_decode), "active": False, "status": "disabled"},
         }
 
-        for key in list(self.compile_futures.keys()):
-            pending = self.compile_futures[key]
-            if pending["future"].done():
-                pending["executor"].shutdown(wait=False, cancel_futures=True)
-                del self.compile_futures[key]
-
         if self.unet and not isinstance(self.unet, str) and hasattr(self.unet, "_eager_forward") and not compile_unet:
             self.unet.forward = self.unet._eager_forward
 
