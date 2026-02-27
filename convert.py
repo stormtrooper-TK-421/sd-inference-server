@@ -561,6 +561,10 @@ def revert(model_type, state_dict):
         raise ValueError(f"unknown model type: {model_type}")
 
 if __name__ == '__main__':
+    from runtime_compat import ensure_supported_python
+
+    ensure_supported_python()
+
     import argparse
     parser = argparse.ArgumentParser(description='Model conversion')
     parser.add_argument('model', type=str, help='path to model')

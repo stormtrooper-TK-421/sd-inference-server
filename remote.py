@@ -14,6 +14,10 @@ import urllib.parse
 from server import Server
 
 if __name__ == "__main__":
+    from runtime_compat import ensure_supported_python
+
+    ensure_supported_python()
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--bind', type=str, default="127.0.0.1:28888")
     parser.add_argument('--password', type=str, default="")
