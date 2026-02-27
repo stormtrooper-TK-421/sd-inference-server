@@ -44,3 +44,5 @@ This command uses `--pre` and the `cu130` nightly index already embedded in `req
   - `scheduler_config.json["config"]["prediction_type"]`
   - falling back to `unet.config.prediction_type` or `"epsilon"`
 - Smoke tests now validate txt2img + img2img paths for SD1.5/SD2.x/SDXL model families and assert decoded outputs are non-black.
+
+For the full repo-wide migration approach, see `docs/python-cuda13-migration-plan.md`.
