@@ -453,7 +453,7 @@ def _detect_diffusers_architecture(in_folder):
 def convert_diffusers_folder(in_folder):
     #print(f"CONVERTING {in_folder.rsplit(os.path.sep,1)[-1]}")
     from diffusers import AutoencoderKL, UNet2DConditionModel
-    from transformers import CLIPTextModel
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection
 
     unet_path = os.path.join(in_folder, "unet")
     vae_path = os.path.join(in_folder, "vae")
@@ -490,9 +490,14 @@ def convert_diffusers_folder(in_folder):
         "text_encoder": "CLIP.ldm_clip" if model_type == "SDXL-Base" else "CLIP",
         "text_encoder_2": "CLIP.open_clip",
     }
+    clip_model_classes = {
+        "text_encoder": CLIPTextModel,
+        "text_encoder_2": CLIPTextModelWithProjection,
+    }
     for clip_subdir in architecture["text_encoder_paths"]:
         clip_path = os.path.join(in_folder, clip_subdir)
-        clip = CLIPTextModel.from_pretrained(clip_path).to(torch.float16).state_dict()
+        clip_model_class = clip_model_classes.get(clip_subdir, CLIPTextModel)
+        clip = clip_model_class.from_pretrained(clip_path).to(torch.float16).state_dict()
         clip_prefix = clip_key_prefixes.get(clip_subdir, "CLIP")
         for k in list(clip.keys()):
             state_dict[f"{namespace}.{clip_prefix}.{k}"] = clip[k]
