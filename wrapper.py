@@ -440,23 +440,35 @@ class GenerationParameters():
         if not self._is_cuda_device(device):
             return False
 
-        value = str(allow_tf32 or "Auto").strip().lower()
+        raw_value = "Auto" if allow_tf32 is None else allow_tf32
+        value = str(raw_value).strip().lower()
         if value in {"enabled", "true", "1", "on", "yes"}:
             return True
         if value in {"disabled", "false", "0", "off", "no"}:
             return False
         return torch.cuda.get_device_capability(device)[0] >= 8
 
+    def _is_bf16_supported(self, device):
+        if not self._is_cuda_device(device):
+            return False
+
+        with torch.cuda.device(device):
+            try:
+                return torch.cuda.is_bf16_supported()
+            except TypeError:
+                return torch.cuda.is_bf16_supported(device)
+
     def _resolve_autocast_dtype(self, dtype, device):
         if not self._is_cuda_device(device):
             return None
 
-        value = str(dtype or "Auto").strip().lower()
+        raw_value = "Auto" if dtype is None else dtype
+        value = str(raw_value).strip().lower()
         requested = AUTOCAST_DTYPE_MAP.get(value)
         if requested is None and value not in {"auto", ""}:
             requested = torch.float16
 
-        supports_bf16 = torch.cuda.is_bf16_supported(device)
+        supports_bf16 = self._is_bf16_supported(device)
         if requested == torch.bfloat16:
             return torch.bfloat16 if supports_bf16 else torch.float16
         if requested == torch.float16:
