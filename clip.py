@@ -50,7 +50,7 @@ class CustomSDXLCLIP(torch.nn.Module):
         ldm_clip_cond = ldm_clip_outputs.hidden_states[-clip_skip]
         cond = torch.cat([ldm_clip_cond, open_clip_cond], dim=2)
         
-        emb = self.open_clip.text_projection(open_clip_outputs.pooler_output)
+        emb = self.open_clip.text_projection(open_clip_outputs.pooler_output).squeeze(0)
 
         return cond, emb
 
