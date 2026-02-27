@@ -6,35 +6,35 @@ This branch is validated against the following software/hardware matrix and depe
 
 | Component | Tested value(s) | Allowed range in `requirements.txt` |
 |---|---|---|
-| Python | 3.10.14, 3.11.9 | `>=3.10,<3.12` (project assumption) |
-| CUDA runtime | 12.1 (primary), 12.4 (secondary smoke) | 12.x wheel builds for PyTorch 2.6 |
+| Python | 3.12.x / 3.13.x (experimental) | `>=3.12,<3.14` (nightly availability dependent) |
+| CUDA runtime | 13.x (experimental target) | PyTorch nightly `cu130` wheels |
 | GPU architecture | NVIDIA Ampere / Ada (`sm_80+`), tested on RTX 30xx/40xx | `sm_75+` may run with reduced throughput |
-| torch | `2.6.0` | `>=2.6.0,<2.7` |
-| torchvision | `0.21.0` | `>=0.21.0,<0.22` |
-| diffusers | `0.35.0` | `>=0.35.0,<0.36` |
-| transformers | `4.50.0` | `>=4.50.0,<4.53` |
-| accelerate | `1.2.1` | `>=1.2.1,<1.4` |
-| safetensors | `0.5.3` | `>=0.5.3,<0.6` |
-| Pillow | `10.4.0` | `>=10.4.0,<11` |
-| NumPy | `1.26.4` | `>=1.26.4,<2.2` |
-| timm | `1.0.11` | `>=1.0.11,<1.1` |
-| pytorch-lightning | `2.4.0` | `>=2.4.0,<2.5` |
+| torch | nightly (`--pre`) | resolved from `https://download.pytorch.org/whl/nightly/cu130` |
+| torchvision | nightly (`--pre`) | resolved from `https://download.pytorch.org/whl/nightly/cu130` |
+| diffusers | `0.38.0` | pinned |
+| transformers | `4.58.0` | pinned |
+| accelerate | `1.12.0` | pinned |
+| safetensors | `0.6.2` | pinned |
+| Pillow | `11.3.0` | pinned |
+| NumPy | `2.3.0` | pinned |
+| timm | `1.0.20` | pinned |
+| pytorch-lightning | `2.6.0` | pinned |
 
 ## Upgrade constraints
 
-The following packages are intentionally held back or constrained to avoid known API/ABI regressions during rollout:
+This branch is now intentionally **experimental** and tracks a CUDA 13-first stack.
 
-- `torch` / `torchvision` are capped below the next major/minor pair (`<2.7`, `<0.22`) to avoid unvalidated CUDA kernel, Triton, and extension ABI changes.
-- `diffusers` is capped at `<0.36` while checkpoint loading and scheduler wiring are validated against any new pipeline defaults.
-- `transformers` is capped at `<4.53` to avoid tokenizer/model loader behavior changes that can impact local model repos.
-- `accelerate` is capped at `<1.4` because offload and dispatch internals may shift across minor releases and require adapter updates.
-- `safetensors` is capped at `<0.6` until all runtime readers/writers are validated against new metadata handling semantics.
-- `numpy` is capped at `<2.2` to avoid binary compatibility surprises with transitive native dependencies.
-- `Pillow` is capped at `<11` to keep image decode/encode behavior stable while migration tests are expanded.
-- `k_diffusion` remains pinned at `0.0.15` because sampler integration in this repository uses legacy interfaces not yet refactored for newer snapshots.
-- `basicsr` remains pinned at `1.4.2` due to historically brittle dependency trees and occasional breakage from transitive upgrades.
+- `torch`, `torchvision`, and `torchaudio` are resolved as **nightly pre-release wheels** from the PyTorch `cu130` index.
+- Companion libraries are pinned to a recent set that is expected to interoperate with current nightly PyTorch builds.
+- Breakage from upstream nightly churn is expected; update pins in `requirements.txt` as needed.
 
-Use `requirements-legacy.txt` for rollback to the previous known-good baseline while migration validation is ongoing.
+Install with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+This command uses `--pre` and the `cu130` nightly index already embedded in `requirements.txt`.
 
 ## Upgrade safeguards included
 
