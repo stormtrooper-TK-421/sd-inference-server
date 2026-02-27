@@ -7,6 +7,8 @@ import sys
 import datetime
 import argparse
 
+from python_compat import require_supported_python
+
 import threading
 import queue
 import websockets.exceptions
@@ -503,6 +505,7 @@ class Server():
             return False
 
 if __name__ == "__main__":
+    require_supported_python()
     parser = argparse.ArgumentParser(description='sd-inference-server')
     parser.add_argument('--bind', type=str, help='address (ip:port) to listen on', default="127.0.0.1:28888")
     parser.add_argument('--password', type=str, help='password to derive encryption key from', default=DEFAULT_PASSWORD)

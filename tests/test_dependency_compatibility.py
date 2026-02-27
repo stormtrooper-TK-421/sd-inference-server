@@ -1,3 +1,7 @@
+import ast
+import sys
+from pathlib import Path
+
 import torch
 
 from convert import _read_prediction_type
@@ -39,3 +43,30 @@ def test_set_module_tensor_to_device_compatibility_wrapper_updates_parameter():
     set_module_tensor_to_device(module, "weight", replacement)
 
     assert torch.equal(module.weight.detach(), replacement)
+
+
+def test_python_runtime_matches_project_policy():
+    assert (3, 14) <= sys.version_info[:2] < (3, 15)
+
+
+def test_all_cli_entrypoints_enforce_python_compatibility_guard():
+    entrypoints = [
+        Path("server.py"),
+        Path("remote.py"),
+        Path("convert.py"),
+        Path("scripts/example.py"),
+    ]
+
+    for entrypoint in entrypoints:
+        source = entrypoint.read_text(encoding="utf-8")
+        module = ast.parse(source, filename=str(entrypoint))
+        assert any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "python_compat"
+            and any(alias.name == "require_supported_python" for alias in node.names)
+            for node in module.body
+        ), f"{entrypoint} must import require_supported_python"
+
+        assert "require_supported_python()" in source, (
+            f"{entrypoint} must call require_supported_python() in its startup path"
+        )

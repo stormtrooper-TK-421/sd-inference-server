@@ -4,6 +4,8 @@ import glob
 import shutil
 import json
 
+from python_compat import require_supported_python
+
 import torch
 import safetensors
 import safetensors.torch
@@ -561,6 +563,7 @@ def revert(model_type, state_dict):
         raise ValueError(f"unknown model type: {model_type}")
 
 if __name__ == '__main__':
+    require_supported_python()
     import argparse
     parser = argparse.ArgumentParser(description='Model conversion')
     parser.add_argument('model', type=str, help='path to model')
