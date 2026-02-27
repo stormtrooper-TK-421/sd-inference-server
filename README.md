@@ -6,7 +6,7 @@ This branch is validated against the following software/hardware matrix and depe
 
 | Component | Tested value(s) | Allowed range in `requirements.txt` |
 |---|---|---|
-| Python | 3.12.x / 3.13.x (experimental) | `>=3.12,<3.14` (nightly availability dependent) |
+| Python | 3.13.x (preferred), 3.12.x (supported) | `>=3.12,<3.14` |
 | CUDA runtime | 13.x (experimental target) | PyTorch nightly `cu130` wheels |
 | GPU architecture | NVIDIA Ampere / Ada (`sm_80+`), tested on RTX 30xx/40xx | `sm_75+` may run with reduced throughput |
 | torch | nightly (`--pre`) | resolved from `https://download.pytorch.org/whl/nightly/cu130` |
@@ -28,9 +28,12 @@ This branch is now intentionally **experimental** and tracks a CUDA 13-first sta
 - Companion libraries are pinned to a recent set that is expected to interoperate with current nightly PyTorch builds.
 - Breakage from upstream nightly churn is expected; update pins in `requirements.txt` as needed.
 
-Install with:
+Install with (recommended on Python 3.13):
+
+If you use `pyenv`, this repo's `.python-version` defaults to `3.13`.
 
 ```bash
+python --version  # expected: 3.13.x (preferred) or 3.12.x
 python -m pip install -r requirements.txt
 ```
 
