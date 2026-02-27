@@ -70,3 +70,30 @@ def test_all_cli_entrypoints_enforce_python_compatibility_guard():
         assert "require_supported_python()" in source, (
             f"{entrypoint} must call require_supported_python() in its startup path"
         )
+
+
+def test_requirements_cover_runtime_top_level_dependencies():
+    requirements = {
+        line.split("==", 1)[0].split(">=", 1)[0].split("<", 1)[0].strip().lower()
+        for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#") and not line.strip().startswith("--")
+    }
+
+    runtime_import_to_requirement = {
+        "cv2": "opencv-python-headless",
+        "lycoris": "lycoris-lora",
+        "packaging": "packaging",
+        "requests": "requests",
+        "scipy": "scipy",
+        "skimage": "scikit-image",
+        "spandrel": "spandrel",
+        "ultralytics": "ultralytics",
+        "yaml": "pyyaml",
+    }
+
+    missing = [
+        requirement
+        for requirement in runtime_import_to_requirement.values()
+        if requirement not in requirements
+    ]
+    assert not missing, f"requirements.txt is missing runtime dependency pins: {missing}"
