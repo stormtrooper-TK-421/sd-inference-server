@@ -70,12 +70,20 @@ def _install_fake_diffusers_and_transformers(monkeypatch):
         def state_dict(self):
             return {"weight": torch.zeros((1,), dtype=torch.float16)}
 
+    class _FakeProjectionComponent(_FakeComponent):
+        def state_dict(self):
+            return {
+                "weight": torch.zeros((1,), dtype=torch.float16),
+                "text_projection.weight": torch.zeros((1, 1), dtype=torch.float16),
+            }
+
     fake_diffusers = types.ModuleType("diffusers")
     fake_diffusers.AutoencoderKL = _FakeComponent
     fake_diffusers.UNet2DConditionModel = _FakeUNetModel
 
     fake_transformers = types.ModuleType("transformers")
     fake_transformers.CLIPTextModel = _FakeComponent
+    fake_transformers.CLIPTextModelWithProjection = _FakeProjectionComponent
 
     monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
@@ -110,6 +118,14 @@ def test_convert_diffusers_folder_keeps_epsilon_metadata(tmp_path, monkeypatch):
     assert metadata["prediction_type"] == "epsilon"
 
 
+def _ensure_sdxl_text_encoder_dirs(model_dir, fixture_name):
+    if fixture_name == "sdxl_base":
+        os.makedirs(os.path.join(model_dir, "text_encoder"), exist_ok=True)
+        os.makedirs(os.path.join(model_dir, "text_encoder_2"), exist_ok=True)
+    elif fixture_name == "sdxl_refiner":
+        os.makedirs(os.path.join(model_dir, "text_encoder_2"), exist_ok=True)
+
+
 @pytest.mark.parametrize(
     "fixture_name,expected_model_type,expected_model_variant",
     [
@@ -121,6 +137,7 @@ def test_convert_diffusers_folder_keeps_epsilon_metadata(tmp_path, monkeypatch):
 )
 def test_detect_diffusers_architecture_fixtures(fixture_name, expected_model_type, expected_model_variant):
     model_dir = os.path.join("tests", "fixtures", "diffusers_arch", fixture_name)
+    _ensure_sdxl_text_encoder_dirs(model_dir, fixture_name)
 
     architecture = _detect_diffusers_architecture(model_dir)
 
@@ -147,9 +164,20 @@ def test_convert_diffusers_folder_uses_detected_metadata(
 ):
     _install_fake_diffusers_and_transformers(monkeypatch)
     model_dir = os.path.join("tests", "fixtures", "diffusers_arch", fixture_name)
+    _ensure_sdxl_text_encoder_dirs(model_dir, fixture_name)
 
     _, metadata = convert_diffusers_folder(model_dir)
 
     assert metadata["model_type"] == expected_model_type
     assert metadata["model_variant"] == expected_model_variant
     assert metadata["prediction_type"] == "epsilon"
+
+
+def test_convert_diffusers_folder_sdxl_uses_projection_capable_text_encoder_2(monkeypatch):
+    _install_fake_diffusers_and_transformers(monkeypatch)
+    model_dir = os.path.join("tests", "fixtures", "diffusers_arch", "sdxl_base")
+    _ensure_sdxl_text_encoder_dirs(model_dir, "sdxl_base")
+
+    state_dict, _ = convert_diffusers_folder(model_dir)
+
+    assert "SDXL-Base.CLIP.open_clip.text_projection.weight" in state_dict
