@@ -39,6 +39,8 @@ python -m pip install -r requirements.txt
 
 This command uses `--pre` and the `cu130` nightly index already embedded in `requirements.txt`.
 
+For notebook workflows, the main requirements now include Python 3.14-compatible `ipykernel`, `jupyterlab`, and `notebook` pins so local Jupyter environments stay aligned with the runtime policy.
+
 ## Upgrade safeguards included
 
 - `accelerate.utils.modeling.set_module_tensor_to_device` now uses a signature-aware wrapper so the code remains compatible with recent `accelerate` releases.

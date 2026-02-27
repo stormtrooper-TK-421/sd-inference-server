@@ -4,7 +4,7 @@
 Align the repository to Python `3.14` as the single supported interpreter track for the CUDA 13 (`cu130`) PyTorch stack used in this project.
 
 ## Current State (from repo)
-- The runtime stack is configured for `cu130` nightly wheels via `requirements.txt`.
+- The runtime stack is configured for `cu130` nightly wheels via `requirements.txt`, including notebook tooling pins (`ipykernel`, `jupyterlab`, `notebook`) aligned to Python 3.14.
 - Interpreter policy is now centralized in:
   - `pyproject.toml` with `requires-python = ">=3.14,<3.15"`
   - `.python-version` pinned to `3.14`
@@ -23,6 +23,6 @@ Align the repository to Python `3.14` as the single supported interpreter track 
 4. Add/adjust CI test matrices to use Python 3.14 only.
 
 ## Acceptance Criteria
-- A fresh setup using Python 3.14 installs with existing dependency files.
+- A fresh setup using Python 3.14 installs with existing dependency files (including notebook tooling).
 - Runtime entry points fail fast with actionable guidance when launched on unsupported versions.
 - Compatibility documentation consistently references Python 3.14 as required.
