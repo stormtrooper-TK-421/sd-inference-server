@@ -37,8 +37,6 @@ scikit-image==0.25.2
 scipy==1.16.2
 spandrel==0.4.1
 ultralytics==8.3.228
-PySide6==6.9.2
-
 # Notebook tooling aligned with Python 3.14 runtime
 ipykernel==7.1.0
 jupyterlab==4.4.10

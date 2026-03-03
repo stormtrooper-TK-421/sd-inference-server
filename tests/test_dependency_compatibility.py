@@ -83,7 +83,6 @@ def test_requirements_cover_runtime_top_level_dependencies():
         "cv2": "opencv-python-headless",
         "lycoris": "lycoris-lora",
         "packaging": "packaging",
-        "pyside6": "pyside6",
         "requests": "requests",
         "scipy": "scipy",
         "skimage": "scikit-image",

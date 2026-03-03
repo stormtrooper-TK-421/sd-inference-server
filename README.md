@@ -19,7 +19,6 @@ This branch is validated against the following software/hardware matrix and depe
 | NumPy | `2.3.0` | pinned |
 | timm | `1.0.20` | pinned |
 | pytorch-lightning | `2.6.0` | pinned |
-| PySide6 | `6.9.2` | pinned |
 
 ## Upgrade constraints
 
@@ -42,7 +41,6 @@ This command uses `--pre` and the `cu130` nightly index already embedded in `req
 
 For notebook workflows, the main requirements now include Python 3.14-compatible `ipykernel`, `jupyterlab`, and `notebook` pins so local Jupyter environments stay aligned with the runtime policy.
 
-Qt bindings are standardized on `PySide6` so downstream tools expecting a Qt6 runtime stay compatible.
 
 ## Upgrade safeguards included
 
