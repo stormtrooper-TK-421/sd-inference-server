@@ -13,7 +13,7 @@ import threading
 import queue
 import websockets.exceptions
 import websockets.sync.server
-import bson
+from bson import BSON
 import time
 
 import storage
@@ -398,7 +398,7 @@ class Server():
                 if not self.clients[client_id].empty():
                     id, response = self.clients[client_id].get()
                     response["id"] = id
-                    data = encrypt(self.scheme, bson.dumps(response))
+                    data = encrypt(self.scheme, BSON.encode(response))
                     data = [data[i:min(i+FRAGMENT_SIZE,len(data))] for i in range(0, len(data), FRAGMENT_SIZE)]
                     connection.send(data)
                 else:
@@ -424,7 +424,7 @@ class Server():
                         try:
                             data = decrypt(self.scheme, bytes(data))
                             try:
-                                request = bson.loads(data)
+                                request = BSON(data).decode()
                             except:
                                 error = "Malformed request"
                         except:
