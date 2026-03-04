@@ -16,7 +16,7 @@ This branch is validated against the following software/hardware matrix and depe
 | accelerate | `1.12.0` | pinned |
 | safetensors | `0.6.2` | pinned |
 | Pillow | `11.3.0` | pinned |
-| NumPy | `2.3.0` | pinned |
+| NumPy | `2.3.2` | pinned |
 | timm | `1.0.20` | pinned |
 | pytorch-lightning | `2.6.0` | pinned |
 
