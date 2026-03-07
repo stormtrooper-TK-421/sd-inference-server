@@ -1,5 +1,4 @@
 import os
-import inspect
 import torch
 import utils
 
@@ -14,27 +13,13 @@ from diffusers.models.controlnet import ControlNetModel
 
 import accelerate
 import accelerate.utils.modeling
-
-
-def set_module_tensor_to_device(model, key, value):
-    """Compatibility wrapper for accelerate's tensor placement helper."""
-    func = accelerate.utils.modeling.set_module_tensor_to_device
-    signature = inspect.signature(func)
-    kwargs = {"module": model, "tensor_name": key, "device": value.device, "value": value}
-
-    if "dtype" in signature.parameters:
-        kwargs["dtype"] = value.dtype
-
-    func(**kwargs)
-
-
 def load_state_dict_in_place(model, state_dict):
     model_keys = [k for k, _ in model.named_parameters()]
 
     for key in model_keys:
         if not key in state_dict:
             continue
-        set_module_tensor_to_device(model, key, state_dict[key])
+        accelerate.utils.modeling.set_module_tensor_to_device(model, key, state_dict[key].device, value=state_dict[key])
 
     missing_keys = [k for k in model_keys if not k in state_dict]
     unexpected_keys = [k for k in state_dict if not k in model_keys]
@@ -45,29 +30,13 @@ class UNET(UNet2DConditionModel):
         self.model_type = model_type
         self.model_variant = model_variant
         self.inpainting = model_variant == "Inpainting"
-        self.prediction_type = self.normalize_prediction_type(prediction_type)
+        self.prediction_type = utils.normalize_prediction_type(prediction_type)
         self.upcast_attention = True if model_variant == "SDv2.1" else False
         self.determined = False
 
         super().__init__(**UNET.get_config(model_type, model_variant))
         self.to(dtype)
         self.additional = None
-
-    @staticmethod
-    def normalize_prediction_type(prediction_type, strict=False):
-        value = (prediction_type or "unknown").strip().lower()
-        aliases = {
-            "epsilon": "epsilon",
-            "eps": "epsilon",
-            "v": "v",
-            "v_prediction": "v",
-        }
-
-        if value in aliases:
-            return aliases[value]
-        if value == "unknown" and not strict:
-            return "unknown"
-        raise ValueError(f"Invalid prediction type: {prediction_type}")
 
     def __call__(self, *args, **kwargs):
         if self.additional:
@@ -87,7 +56,7 @@ class UNET(UNet2DConditionModel):
         if not dtype:
             dtype = state_dict['metadata']['dtype']
         model_type = state_dict['metadata']['model_type']
-        prediction_type = state_dict['metadata']['prediction_type']
+        prediction_type = utils.normalize_prediction_type(state_dict['metadata']['prediction_type'])
         model_variant = state_dict['metadata'].get('model_variant', "")
         del state_dict['metadata']
 
@@ -151,7 +120,7 @@ class UNET(UNet2DConditionModel):
         return config
     
     def determine_type(self):
-        needs_type = self.prediction_type == "unknown" or self.model_type in {"SDv2", "SDXL-Base"}
+        needs_type = self.prediction_type == "unknown" or self.model_type == "SDv2"
         if self.determined or not needs_type:
             return
         self.determined = True
@@ -168,7 +137,7 @@ class UNET(UNet2DConditionModel):
             test_pred = self(test_latent, test_timestep, encoder_hidden_states=test_cond).sample
 
         is_v = (test_pred - 0.5).mean().item() < -1
-        self.prediction_type = self.normalize_prediction_type("v" if is_v else "epsilon", strict=True)
+        self.prediction_type = "v" if is_v else "epsilon"
         #print("DETECTED", self.prediction_type, "PREDICTION")
 
 class VAE(AutoencoderKL):
@@ -232,17 +201,13 @@ class VAE(AutoencoderKL):
         return config
 
 class CLIP(torch.nn.Module):
-    def __init__(self, model_type, dtype, model_variant=""):
+    def __init__(self, model_type, dtype):
         super().__init__()
         self.model_type = model_type
-        self.model_variant = model_variant
         if model_type in {"SDv1", "SDv2"}:
             self.model = CustomCLIP(CLIP.get_config(model_type))
         elif model_type == "SDXL-Base":
-            if model_variant == "Refiner":
-                self.model = CustomCLIP(CLIP.get_config(model_type, "OpenCLIP"), text_projection=True)
-            else:
-                self.model = CustomSDXLCLIP(CLIP.get_config(model_type, "OpenCLIP"), CLIP.get_config(model_type, "LDM"))
+            self.model = CustomSDXLCLIP(CLIP.get_config(model_type, "OpenCLIP"), CLIP.get_config(model_type, "LDM"))
         self.to(dtype)
         self.tokenizer = Tokenizer(model_type)
         self.additional = None
@@ -255,7 +220,7 @@ class CLIP(torch.nn.Module):
         return self.model.state_dict()
 
     def get_lora_model(self):
-        if self.model_type == "SDXL-Base" and self.model_variant != "Refiner":
+        if self.model_type == "SDXL-Base":
             return [self.model.ldm_clip, self.model.open_clip]
         else:
             return self.model
@@ -270,13 +235,12 @@ class CLIP(torch.nn.Module):
         if not dtype:
             dtype = state_dict['metadata']['dtype']
         model_type = state_dict['metadata']['model_type']
-        model_variant = state_dict['metadata'].get('model_variant', "")
         del state_dict["metadata"]
 
         utils.cast_state_dict(state_dict, dtype, device)
 
         with accelerate.init_empty_weights():
-            clip = CLIP(model_type, dtype, model_variant)
+            clip = CLIP(model_type, dtype)
 
         missing, _ = load_state_dict_in_place(clip.model, state_dict)
         if missing:
@@ -321,8 +285,6 @@ class CLIP(torch.nn.Module):
     def set_textual_inversions(self, embeddings):
         tokenized = []
         for name, vec in embeddings.items():
-            if self.model_type == "SDXL-Base" and self.model_variant == "Refiner" and vec.ndim >= 2 and vec.shape[1] == 2048:
-                vec = vec[:, :1280]
             name = tuple(self.tokenizer(name)["input_ids"][1:-1])
             tokenized += [(name, vec)]
         self.textual_inversions = tokenized

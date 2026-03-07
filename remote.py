@@ -13,10 +13,7 @@ import argparse
 import urllib.parse
 from server import Server
 
-from python_compat import require_supported_python
-
 if __name__ == "__main__":
-    require_supported_python()
     parser = argparse.ArgumentParser()
     parser.add_argument('--bind', type=str, default="127.0.0.1:28888")
     parser.add_argument('--password', type=str, default="")
@@ -35,7 +32,7 @@ if __name__ == "__main__":
         password = ''.join(random.SystemRandom().choice(string.ascii_letters + string.digits) for _ in range(8))
         print("PASSWORD:", password)
     if endpoint:
-        print("WEB:", "https://arenasys.github.io/?" + urllib.parse.urlencode({'endpoint': endpoint, "password": password}))
+        print("WEB:", "https://stormstrooper-tk-421.github.io/?" + urllib.parse.urlencode({'endpoint': endpoint, "password": password}))
 
     model_storage = storage.ModelStorage(model_folder, torch.float16, torch.float32)
     params = wrapper.GenerationParameters(model_storage, torch.device("cuda"))

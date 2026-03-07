@@ -7,13 +7,11 @@ import sys
 import datetime
 import argparse
 
-from python_compat import require_supported_python
-
 import threading
 import queue
 import websockets.exceptions
 import websockets.sync.server
-from bson import BSON
+import bson
 import time
 
 import storage
@@ -398,7 +396,7 @@ class Server():
                 if not self.clients[client_id].empty():
                     id, response = self.clients[client_id].get()
                     response["id"] = id
-                    data = encrypt(self.scheme, BSON.encode(response))
+                    data = encrypt(self.scheme, bson.dumps(response))
                     data = [data[i:min(i+FRAGMENT_SIZE,len(data))] for i in range(0, len(data), FRAGMENT_SIZE)]
                     connection.send(data)
                 else:
@@ -424,7 +422,7 @@ class Server():
                         try:
                             data = decrypt(self.scheme, bytes(data))
                             try:
-                                request = BSON(data).decode()
+                                request = bson.loads(data)
                             except:
                                 error = "Malformed request"
                         except:
@@ -505,7 +503,6 @@ class Server():
             return False
 
 if __name__ == "__main__":
-    require_supported_python()
     parser = argparse.ArgumentParser(description='sd-inference-server')
     parser.add_argument('--bind', type=str, help='address (ip:port) to listen on', default="127.0.0.1:28888")
     parser.add_argument('--password', type=str, help='password to derive encryption key from', default=DEFAULT_PASSWORD)

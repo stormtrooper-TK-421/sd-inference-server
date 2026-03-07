@@ -2,10 +2,7 @@ import PIL.Image
 import argparse
 from scripts import Connection, encode_image, decode_image
 
-from python_compat import require_supported_python
-
 if __name__ == "__main__":
-    require_supported_python()
     parser = argparse.ArgumentParser(description='sd-inference-server')
     parser.add_argument('--endpoint', type=str, help='endpoint address', default="ws://127.0.0.1:28888")
     parser.add_argument('--password', type=str, help='endpoint password', default="")

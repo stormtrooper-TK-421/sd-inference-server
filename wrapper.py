@@ -9,7 +9,6 @@ import safetensors.torch
 import shutil
 import tomesd
 import contextlib
-import concurrent.futures
 import numpy as np
 
 DIRECTML_AVAILABLE = False
@@ -43,9 +42,7 @@ import models
 DEFAULTS = {
     "strength": 0.75, "sampler": "Euler a", "clip_skip": 1, "eta": 1,
     "hr_upscaler": "Latent (nearest)", "hr_strength": 0.7, "img2img_upscaler": "Lanczos", "mask_blur": 4,
-    "attention": "Default", "vram_mode": "Default", "legacy_attention": False,
-    "allow_tf32": "Auto", "autocast_dtype": "Auto",
-    "compile_mode": "Disabled", "compile_vae_decode": False, "compile_timeout": 60
+    "attention": "Default", "vram_mode": "Default"
 }
 
 TYPES = {
@@ -53,27 +50,7 @@ TYPES = {
     float: ["scale", "eta", "hr_factor", "hr_eta", "hr_scale"],
 }
 
-STATIC = ["storage", "device", "device_names", "callback", "last_models_modified", "last_models_config", "dataset", "public", "temporary", "compiled_modules", "compile_runtime"]
-
-
-class _FallbackCompiledCallable:
-    def __init__(self, eager, compiled, state):
-        self.eager = eager
-        self.compiled = compiled
-        self.state = state
-
-    def __call__(self, *args, **kwargs):
-        if self.state.get("fallback") or not self.compiled:
-            return self.eager(*args, **kwargs)
-
-        try:
-            return self.compiled(*args, **kwargs)
-        except Exception as ex:
-            self.state["fallback"] = True
-            self.state["active"] = False
-            self.state["status"] = "runtime_fallback"
-            self.state["error"] = str(ex)
-            return self.eager(*args, **kwargs)
+STATIC = ["storage", "device", "device_names", "callback", "last_models_modified", "last_models_config", "dataset", "public", "temporary"]
 
 SAMPLER_CLASSES = {
     "Euler": samplers_k.Euler,
@@ -134,23 +111,16 @@ UPSCALERS_PIXEL = {
 }
 
 CROSS_ATTENTION = {
-    "Default": "Default",
-    "Split": "Split",
-    "Doggettx": "Doggettx",
-    "Flash": "Flash",
-    "Original": "Original",
-    "SDP": "SDP",
-    "XFormers": "XFormers",
+    "Default": attention.use_optimized_attention,
+    "Split": attention.use_split_attention,
+    "Doggettx": attention.use_doggettx_attention,
+    "Flash": attention.use_flash_attention,
+    "Original": attention.use_diffusers_attention,
+    "SDP": attention.use_sdp_attention,
+    "XFormers": attention.use_xformers_attention
 }
 
 FP32_DEVICES = ["1660", "1650", "1630", "T500", "T550", "T600", "MX550", "MX450", "CMP 30HX"]
-AUTOCAST_DTYPE_MAP = {
-    "fp16": torch.float16,
-    "float16": torch.float16,
-    "half": torch.float16,
-    "bf16": torch.bfloat16,
-    "bfloat16": torch.bfloat16,
-}
 
 def format_float(x):
     return f"{x:.4f}".rstrip('0').rstrip('.')
@@ -187,13 +157,6 @@ class GenerationParameters():
 
         self.callback = None
         self.temporary = {}
-        self.selected_attention_backend = attention.get_selected_backend()
-        self.compiled_modules = {}
-        self.compile_runtime = {
-            "enabled": False,
-            "unet": {"requested": False, "active": False, "status": "disabled"},
-            "vae_decode": {"requested": False, "active": False, "status": "disabled"},
-        }
 
     def switch_public(self):
         self.public = True
@@ -432,8 +395,6 @@ class GenerationParameters():
         
         self.storage.clear_file_cache()
 
-        self.prepare_compiled_modules()
-
         if self.cn and all([type(cn) == str for cn in self.cn]):
             self.cn_names = [c for c in self.cn]
         
@@ -462,161 +423,6 @@ class GenerationParameters():
             self.storage.vae_dtype = torch.float32
         else:
             self.storage.vae_dtype = torch.float16
-
-    def _is_cuda_device(self, device):
-        return isinstance(device, torch.device) and device.type == "cuda"
-
-    def _resolve_tf32_policy(self, allow_tf32, device):
-        if not self._is_cuda_device(device):
-            return False
-
-        value = str(allow_tf32 or "Auto").strip().lower()
-        if value in {"enabled", "true", "1", "on", "yes"}:
-            return True
-        if value in {"disabled", "false", "0", "off", "no"}:
-            return False
-        return torch.cuda.get_device_capability(device)[0] >= 8
-
-    def _resolve_autocast_dtype(self, dtype, device):
-        if not self._is_cuda_device(device):
-            return None
-
-        value = str(dtype or "Auto").strip().lower()
-        requested = AUTOCAST_DTYPE_MAP.get(value)
-        if requested is None and value not in {"auto", ""}:
-            requested = torch.float16
-
-        supports_bf16 = torch.cuda.is_bf16_supported(device)
-        if requested == torch.bfloat16:
-            return torch.bfloat16 if supports_bf16 else torch.float16
-        if requested == torch.float16:
-            return torch.float16
-        return torch.bfloat16 if supports_bf16 else torch.float16
-
-    def configure_performance_policy(self):
-        self.active_tf32 = self._resolve_tf32_policy(self.allow_tf32, self.device)
-        self.active_autocast_dtype = self._resolve_autocast_dtype(self.autocast_dtype, self.device)
-
-        if self._is_cuda_device(self.device):
-            torch.backends.cuda.matmul.allow_tf32 = self.active_tf32
-            torch.backends.cudnn.allow_tf32 = self.active_tf32
-
-
-    def _is_compile_enabled(self):
-        value = str(self.compile_mode or "Disabled").strip().lower()
-        return value in {"enabled", "true", "1", "on", "yes", "unet", "all", "unet+vae"}
-
-    def _is_compile_vae_enabled(self):
-        mode = str(self.compile_mode or "Disabled").strip().lower()
-        vae_mode = mode in {"all", "unet+vae", "vae"}
-        return vae_mode or bool(self.compile_vae_decode)
-
-    def _compile_with_timeout(self, fn, timeout):
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(fn)
-        try:
-            return future.result(timeout=timeout)
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
-
-    def _compile_module(self, module, key, timeout):
-        state = {"requested": True, "active": False, "status": "eager"}
-
-        if not self._is_cuda_device(self.device) or not hasattr(torch, "compile"):
-            state["status"] = "unsupported"
-            return state
-
-        eager_forward = getattr(module, "_eager_forward", None)
-        if eager_forward is None:
-            eager_forward = module.forward
-            module._eager_forward = eager_forward
-
-        if key in self.compiled_modules:
-            cached = self.compiled_modules[key]
-            state = cached["state"]
-            state["requested"] = True
-            module.forward = cached["module"]
-            return state
-
-        try:
-            compiled = self._compile_with_timeout(lambda: torch.compile(module), timeout)
-            compiled_forward = compiled.forward if hasattr(compiled, "forward") else compiled
-            state["active"] = True
-            state["status"] = "compiled"
-            wrapped = _FallbackCompiledCallable(eager_forward, compiled_forward, state)
-            self.compiled_modules[key] = {"module": wrapped, "state": state}
-            module.forward = wrapped
-            return state
-        except concurrent.futures.TimeoutError:
-            state["status"] = "timeout"
-            module.forward = eager_forward
-            return state
-        except Exception as ex:
-            state["status"] = "error"
-            state["error"] = str(ex)
-            module.forward = eager_forward
-            return state
-
-    def _compile_vae_decode(self, vae, key, timeout):
-        state = {"requested": True, "active": False, "status": "eager"}
-
-        if not self._is_cuda_device(self.device) or not hasattr(torch, "compile"):
-            state["status"] = "unsupported"
-            return state
-
-        eager_decode = getattr(vae, "_eager_decode", None)
-        if eager_decode is None:
-            eager_decode = vae.decode
-            vae._eager_decode = eager_decode
-
-        if key in self.compiled_modules:
-            cached = self.compiled_modules[key]
-            state = cached["state"]
-            state["requested"] = True
-            vae.decode = cached["module"]
-            return state
-
-        try:
-            compiled = self._compile_with_timeout(lambda: torch.compile(eager_decode), timeout)
-            state["active"] = True
-            state["status"] = "compiled"
-            wrapped = _FallbackCompiledCallable(eager_decode, compiled, state)
-            self.compiled_modules[key] = {"module": wrapped, "state": state}
-            vae.decode = wrapped
-            return state
-        except concurrent.futures.TimeoutError:
-            state["status"] = "timeout"
-            vae.decode = eager_decode
-            return state
-        except Exception as ex:
-            state["status"] = "error"
-            state["error"] = str(ex)
-            vae.decode = eager_decode
-            return state
-
-    def prepare_compiled_modules(self):
-        timeout = max(float(self.compile_timeout or 0), 1.0)
-        compile_unet = self._is_compile_enabled()
-        compile_vae_decode = compile_unet and self._is_compile_vae_enabled()
-
-        self.compile_runtime = {
-            "enabled": bool(compile_unet),
-            "unet": {"requested": bool(compile_unet), "active": False, "status": "disabled"},
-            "vae_decode": {"requested": bool(compile_vae_decode), "active": False, "status": "disabled"},
-        }
-
-        if self.vae and not isinstance(self.vae, str) and hasattr(self.vae, "_eager_decode") and not compile_vae_decode:
-            self.vae.decode = self.vae._eager_decode
-
-        if compile_unet and self.unet and not isinstance(self.unet, str):
-            unet_key = ("unet", id(self.unet), self.unet_name, str(self.device), str(self.storage.dtype), self.selected_attention_backend)
-            state = self._compile_module(self.unet, unet_key, timeout)
-            self.compile_runtime["unet"] = state
-
-        if compile_vae_decode and self.vae and not isinstance(self.vae, str):
-            vae_key = ("vae_decode", id(self.vae), self.vae_name, str(self.device), str(self.storage.vae_dtype), self.selected_attention_backend)
-            state = self._compile_vae_decode(self.vae, vae_key, timeout)
-            self.compile_runtime["vae_decode"] = state
 
     def configure_vae(self):
         if not self.vae:
@@ -687,16 +493,10 @@ class GenerationParameters():
                 raise Exception("Merging is disabled")
         
         if self.prediction_type:
-            self.prediction_type = self.prediction_type.lower()
+            self.prediction_type = utils.normalize_prediction_type(self.prediction_type)
 
         if self.hr_prediction_type:
-            self.hr_prediction_type = self.hr_prediction_type.lower()
-
-        try:
-            self.compile_timeout = float(self.compile_timeout or DEFAULTS["compile_timeout"])
-        except (TypeError, ValueError):
-            self.compile_timeout = DEFAULTS["compile_timeout"]
-        self.compile_vae_decode = str(self.compile_vae_decode).strip().lower() in {"true", "1", "on", "yes", "enabled"} if type(self.compile_vae_decode) != bool else self.compile_vae_decode
+            self.hr_prediction_type = utils.normalize_prediction_type(self.hr_prediction_type)
 
         if self.hr_factor and self.hr_unet:
             self.storage.set_ram_limit(2)
@@ -730,32 +530,9 @@ class GenerationParameters():
 
         self.device = device
     
-    def set_attention(self):
-        mode = CROSS_ATTENTION.get(self.attention, "Default")
-        components = [self.unet, self.clip, self.vae]
-        self.selected_attention_backend = attention.apply_attention(
-            mode,
-            self.device,
-            components=components,
-            legacy_attention=bool(self.legacy_attention),
-        )
-
-    def get_info(self):
-        if self.active_autocast_dtype == torch.bfloat16:
-            active_autocast_dtype = "bfloat16"
-        elif self.active_autocast_dtype == torch.float16:
-            active_autocast_dtype = "float16"
-        else:
-            active_autocast_dtype = None
-
-        return {
-            "attention_mode": self.attention,
-            "attention_backend": self.selected_attention_backend or attention.get_selected_backend(),
-            "legacy_attention": bool(self.legacy_attention),
-            "tf32": bool(self.active_tf32),
-            "autocast_dtype": active_autocast_dtype,
-            "compile": self.compile_runtime,
-        }
+    def set_attention(self):       
+        if self.attention and self.attention in CROSS_ATTENTION:
+            CROSS_ATTENTION[self.attention](self.device)
 
     def listify(self, *args):
         if args == None:
@@ -911,8 +688,6 @@ class GenerationParameters():
                     m["padding"] = self.padding
                 m["mask_blur"] = self.mask_blur
 
-            m.update(self.get_info())
-
             if self.merge_lora_recipe:
                 m["merge_lora_recipe"] = self.merge_lora_recipe
                 m["merge_lora_strength"] = self.merge_lora_strength
@@ -1010,10 +785,8 @@ class GenerationParameters():
             tomesd.remove_patch(unet)
 
     def get_autocast_context(self, autocast, device):
-        if autocast and self._is_cuda_device(device):
-            if self.active_autocast_dtype:
-                return torch.autocast("cuda", dtype=self.active_autocast_dtype)
-            return torch.autocast("cuda")
+        if autocast:
+            return torch.autocast('cpu' if device == torch.device('cpu') else 'cuda')
         return contextlib.nullcontext()
 
     def prepare_images(self, inputs, extents, width, height):
@@ -1036,11 +809,9 @@ class GenerationParameters():
 
         self.set_status("Loading")
         self.set_device()
-        self.configure_performance_policy()
         self.set_precision()
         self.set_attention()
         self.load_models(*initial_networks)
-        self.set_attention()
 
         self.attach_tome()
 
@@ -1329,11 +1100,9 @@ class GenerationParameters():
 
         self.set_status("Loading")
         self.set_device()
-        self.configure_performance_policy()
         self.set_precision()
         self.set_attention()
         self.load_models(*initial_networks)
-        self.set_attention()
 
         self.attach_tome()
 
@@ -1478,7 +1247,6 @@ class GenerationParameters():
 
         self.set_status("Loading")
         self.set_device()
-        self.configure_performance_policy()
         self.set_precision()
         self.set_attention()
 
@@ -1488,7 +1256,6 @@ class GenerationParameters():
             self.cn = None
         
         self.load_models(*initial_networks)
-        self.set_attention()
 
         self.attach_tome()
 
@@ -1566,7 +1333,6 @@ class GenerationParameters():
     def upscale(self):
         self.set_status("Loading")
         self.set_device()
-        self.configure_performance_policy()
         self.set_precision()
         self.storage.clear_file_cache()
         self.clear_annotators()
@@ -1656,12 +1422,11 @@ class GenerationParameters():
         data["hr_upscaler"] = list(UPSCALERS_LATENT.keys()) + list(UPSCALERS_PIXEL.keys()) + data["SR"]
         data["img2img_upscaler"] = list(UPSCALERS_PIXEL.keys()) + data["SR"]
 
-        available = attention.get_available(self.device, legacy_attention=bool(self.legacy_attention))
-        data["attention"] = [k for k in CROSS_ATTENTION if k in available]
+        available = attention.get_available() 
+        data["attention"] = [k for k,v in CROSS_ATTENTION.items() if v in available]
 
         data["TI"] = list(self.storage.embeddings_files.keys())
         data["device"] = self.device_names
-        data["compile_mode"] = ["Disabled", "Enabled", "Unet+VAE"]
 
         if self.public:
             data["device"] = ["Default"]
@@ -1831,7 +1596,6 @@ class GenerationParameters():
         self.set_attention()
         
         self.load_models(*initial_networks)
-        self.set_attention()
 
         device = self.unet.device
 

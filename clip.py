@@ -1,6 +1,11 @@
 
 import torch
-from transformers.models.clip.modeling_clip import CLIPTextTransformer, _create_4d_causal_attention_mask, BaseModelOutputWithPooling
+
+from transformers.models.clip.modeling_clip import CLIPTextTransformer, BaseModelOutputWithPooling
+try:
+    from transformers.modeling_attn_mask_utils import _create_4d_causal_attention_mask
+except ImportError:
+    from transformers.models.clip.modeling_clip import _create_4d_causal_attention_mask
 
 class CustomCLIP(torch.nn.Module):
     def __init__(self, config, text_projection=False):
@@ -15,12 +20,9 @@ class CustomCLIP(torch.nn.Module):
         return super().__getattr__(name)
 
     def forward(self, input_ids, clip_skip=1):
-        outputs = self.text_model(input_ids)
-        output = outputs.hidden_states[-clip_skip]
+        output = self.text_model(input_ids).hidden_states[-clip_skip]
         cond = self.text_model.final_layer_norm(output)
         emb = None
-        if hasattr(self, "text_projection"):
-            emb = self.text_projection(outputs.pooler_output)
         return cond, emb
 
 class CustomSDXLCLIP(torch.nn.Module):
@@ -50,7 +52,7 @@ class CustomSDXLCLIP(torch.nn.Module):
         ldm_clip_cond = ldm_clip_outputs.hidden_states[-clip_skip]
         cond = torch.cat([ldm_clip_cond, open_clip_cond], dim=2)
         
-        emb = self.open_clip.text_projection(open_clip_outputs.pooler_output)
+        emb = self.open_clip.text_projection(open_clip_outputs.pooler_output)[0]
 
         return cond, emb
 

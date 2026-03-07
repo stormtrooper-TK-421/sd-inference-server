@@ -1,4 +1,5 @@
 import torch
+import utils
 
 class GuidedDenoiser():
     def __init__(self, unet, device, conditioning_schedule, scale, cfg_rescale, prediction_type=None):
@@ -28,18 +29,16 @@ class GuidedDenoiser():
         self.get_conditioning()
 
     def get_prediction_type(self):
-        prediction_type = self.unet.prediction_type
+        prediction_type = utils.normalize_prediction_type(self.unet.prediction_type)
 
         if self.override_prediction_type:
-            prediction_type = self.override_prediction_type
-
-        prediction_type = self.unet.normalize_prediction_type(prediction_type)
+            prediction_type = utils.normalize_prediction_type(self.override_prediction_type)
 
         if prediction_type == "unknown":
             self.unet.determine_type()
-            prediction_type = self.unet.prediction_type
-
-        return self.unet.normalize_prediction_type(prediction_type, strict=True)
+            prediction_type = utils.normalize_prediction_type(self.unet.prediction_type)
+        
+        return prediction_type
 
     def get_conditioning(self):
         self.compositions = self.conditioning_schedule.get_compositions(self.dtype, self.device)
@@ -64,7 +63,7 @@ class GuidedDenoiser():
         self.cfg_pp = cfg_pp
 
     def set_prediction_type(self, prediction_type):
-        self.override_prediction_type = prediction_type
+        self.override_prediction_type = utils.normalize_prediction_type(prediction_type)
 
     def set_predictions(self, predictions):
         self.predictions = predictions
@@ -151,10 +150,7 @@ class GuidedDenoiser():
         elif prediction_type == "v":
             noise_pred = self.predict_noise_v(model_input, timestep, conditioning, alpha)
         else:
-            raise ValueError(
-                f"Unknown prediction type in predict_noise: {prediction_type}. "
-                "Expected 'epsilon' or 'v'."
-            )
+            raise RuntimeError(f"Unknown prediction type: {prediction_type}")
 
         composed_pred = self.compose_predictions(noise_pred)
         return composed_pred

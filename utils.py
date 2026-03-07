@@ -27,6 +27,27 @@ FROM_TENSOR = transforms.ToPILImage()
 
 MAPPINGS = {}
 
+
+def normalize_prediction_type(prediction_type):
+    if prediction_type == None:
+        return "unknown"
+
+    prediction_type = str(prediction_type).strip().lower()
+    if not prediction_type:
+        return "unknown"
+
+    aliases = {
+        "epsilon": "epsilon",
+        "eps": "epsilon",
+        "noise": "epsilon",
+        "v": "v",
+        "v_prediction": "v",
+        "v-prediction": "v",
+        "vprediction": "v",
+        "unknown": "unknown"
+    }
+    return aliases.get(prediction_type, prediction_type)
+
 def preprocess_images(images):
     def process(image):
         image = TO_TENSOR(image).to(torch.float32)

@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag
-from bson import BSON
+import bson
 import PIL.Image
 
 DEFAULT_PASSWORD = "qDiffusion"
@@ -28,7 +28,7 @@ def get_scheme(password):
     return AESGCM(kdf.derive(password))
 
 def encrypt(scheme, obj):
-    data = BSON.encode(obj)
+    data = bson.dumps(obj)
     if scheme:
         nonce = secrets.token_bytes(16)
         data = nonce + scheme.encrypt(nonce, data, b"")
@@ -37,7 +37,7 @@ def encrypt(scheme, obj):
 def decrypt(scheme, data):
     if scheme:
         data = scheme.decrypt(data[:16], data[16:], b"")
-    obj = BSON(data).decode()
+    obj = bson.loads(data)
     return obj
 
 def encode_image(img):
